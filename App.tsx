@@ -102,6 +102,8 @@ const App: React.FC = () => {
   // PWA Install State
   const [installPrompt, setInstallPrompt] = useState<any>(null);
   
+  const isCloudLoadedRef = useRef(false);
+
   // Ref to handle loop control without dependency staleness
   const batchControlRef = useRef({ 
     shouldStop: false, 
@@ -118,12 +120,19 @@ const App: React.FC = () => {
       if (user) {
         try {
           const cloudLibrary = await loadLibraryFromFirestore(user.uid);
-          if (cloudLibrary) {
-            setLibrary(cloudLibrary);
+          if (cloudLibrary && Object.keys(cloudLibrary.books).length > 0) {
+            setLibrary(prev => {
+              // Smart Merge: Don't let empty cloud delete local work, and don't let empty local delete cloud
+              return { ...cloudLibrary, books: { ...prev.books, ...cloudLibrary.books } };
+            });
           }
         } catch (e) {
           console.error("Failed to load cloud library", e);
+        } finally {
+          isCloudLoadedRef.current = true;
         }
+      } else {
+        isCloudLoadedRef.current = false;
       }
       setIsAuthChecking(false);
     });
@@ -133,7 +142,7 @@ const App: React.FC = () => {
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(library));
-      if (firebaseUser) {
+      if (firebaseUser && isCloudLoadedRef.current) {
         syncLibraryToFirestore(firebaseUser.uid, library).catch(e => console.error(e));
       }
     } catch (e) {
