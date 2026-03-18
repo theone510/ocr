@@ -108,11 +108,22 @@ export const ImageUploader: React.FC<ImageUploaderProps> = ({
               className="max-w-full h-auto object-contain shadow-2xl rounded border border-white/5"
             />
             {/* Overlay Status */}
-            <div className="absolute top-4 left-1/2 transform -translate-x-1/2 bg-slate-900/90 backdrop-blur px-4 py-1.5 rounded-full shadow-lg border border-[#c5a059]/30 flex items-center gap-2">
-                <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse shadow-[0_0_8px_#10b981]"></div>
-                <span className="text-xs font-bold text-white tracking-wide">
-                  {isPdfMode ? 'AUTO-ANALYSIS RUNNING...' : 'ANALYZING IMAGE...'}
-                </span>
+            <div className={`absolute top-4 left-1/2 transform -translate-x-1/2 backdrop-blur px-4 py-1.5 rounded-full shadow-lg border flex items-center gap-2 ${isLoading ? 'bg-slate-900/90 border-[#c5a059]/30' : 'bg-red-950/90 border-red-500/50'}`}>
+                {isLoading ? (
+                  <>
+                    <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse shadow-[0_0_8px_#10b981]"></div>
+                    <span className="text-xs font-bold text-white tracking-wide">
+                      {isPdfMode ? 'AUTO-ANALYSIS RUNNING...' : 'ANALYZING IMAGE...'}
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <div className="w-2 h-2 bg-red-500 rounded-full shadow-[0_0_8px_#ef4444]"></div>
+                    <span className="text-xs font-bold text-red-200 tracking-wide">
+                      توقف بسبب خطأ (راجع الخطأ بالأسفل)
+                    </span>
+                  </>
+                )}
             </div>
          </div>
          
