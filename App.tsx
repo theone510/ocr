@@ -2,6 +2,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { PageData, Book, LibraryState, UploadedImage, LoadingState } from './types';
 import { analyzeManuscript } from './services/geminiService';
+import { auth, loginWithGoogle, logoutUser, syncLibraryToFirestore, loadLibraryFromFirestore } from './services/firebaseService';
+import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
 import { loadPDF, renderPageAsImage, PDFDocumentProxy } from './services/pdfService';
 import { ImageUploader } from './components/ImageUploader';
 import { ResultDisplay } from './components/ResultDisplay';
@@ -87,6 +89,10 @@ const App: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [lastProcessedPageId, setLastProcessedPageId] = useState<string | null>(null);
 
+  // --- Firebase Auth State ---
+  const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
+  const [isAuthChecking, setIsAuthChecking] = useState(true);
+
   // --- PDF Batch State ---
   const [pdfDoc, setPdfDoc] = useState<PDFDocumentProxy | null>(null);
   const [pdfFileName, setPdfFileName] = useState<string>("");
@@ -103,12 +109,37 @@ const App: React.FC = () => {
   });
 
   useEffect(() => {
+    if (!auth) {
+      setIsAuthChecking(false);
+      return;
+    }
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      setFirebaseUser(user);
+      if (user) {
+        try {
+          const cloudLibrary = await loadLibraryFromFirestore(user.uid);
+          if (cloudLibrary) {
+            setLibrary(cloudLibrary);
+          }
+        } catch (e) {
+          console.error("Failed to load cloud library", e);
+        }
+      }
+      setIsAuthChecking(false);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(library));
+      if (firebaseUser) {
+        syncLibraryToFirestore(firebaseUser.uid, library).catch(e => console.error(e));
+      }
     } catch (e) {
       console.error("Storage Error", e);
     }
-  }, [library]);
+  }, [library, firebaseUser]);
 
   // Handle PWA Install Prompt
   useEffect(() => {
@@ -552,6 +583,21 @@ const App: React.FC = () => {
                   <BookCopy size={16} className="ml-2" /> المكتبة الرقمية
                 </Button>
               ) : null}
+
+              <div className="w-[1px] h-6 bg-white/10 mx-2 hidden md:block"></div>
+              
+              {firebaseUser ? (
+                 <div className="flex items-center gap-2">
+                   <span className="text-xs text-slate-400 hidden sm:inline" title={firebaseUser.email || ''}>{firebaseUser.displayName?.split(' ')[0] || 'مستخدم'}</span>
+                   <Button variant="ghost" size="sm" onClick={logoutUser} className="text-[#c5a059] hover:bg-[#c5a059]/10">
+                     <LogOut size={16} className="ml-2 hidden sm:block"/> خروج
+                   </Button>
+                 </div>
+              ) : (
+                <Button variant="ghost" size="sm" onClick={loginWithGoogle} className="text-[#c5a059] hover:bg-[#c5a059]/10 bg-slate-800 border border-[#c5a059]/20">
+                  <User size={16} className="ml-2 hidden sm:block"/> دخول سحابي
+                </Button>
+              )}
             </nav>
           </div>
         </header>
