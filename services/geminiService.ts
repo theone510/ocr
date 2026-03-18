@@ -7,7 +7,7 @@ import { SYSTEM_INSTRUCTION, GEMINI_MODEL } from "../constants";
 export const analyzeManuscript = async (base64Image: string, mimeType: string): Promise<string> => {
   try {
     // Initialize with apiKey from environment variables as per requirements
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_GEMINI_API_KEY });
     
     // Model configuration for high-quality manuscript transcription
     const response = await ai.models.generateContent({
