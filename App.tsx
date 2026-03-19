@@ -1086,9 +1086,11 @@ const FullBookViewer: React.FC<{
     book.pages.forEach((p, idx) => {
       const matches = p.text.matchAll(/<(h[1-3])>(.*?)<\/\1>/g);
       for (const match of matches) {
+        // Strip nested tags like <bold> or <center> from the heading text for the index
+        const cleanTitle = match[2].replace(/<[^>]+>/g, '').trim();
         extractedToc.push({
           id: `heading-${extractedToc.length}`,
-          title: match[2],
+          title: cleanTitle,
           level: parseInt(match[1].substring(1)),
           page: p.pageNumber,
           index: idx // Store index for direct navigation

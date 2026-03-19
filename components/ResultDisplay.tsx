@@ -235,41 +235,28 @@ export const ResultDisplay: React.FC<ResultDisplayProps> = ({
     if (!rawText) return null;
     
     // Fix: Aggressive collapse before footnotes to keep them inline
-    const cleanText = cleanNewlines(rawText).replace(/(?:\r\n|\r|\n)+\s*(\[\d+\])/g, ' $1');
+    let cleanText = cleanNewlines(rawText).replace(/(?:\r\n|\r|\n)+\s*(\[\d+\])/g, ' $1');
     
-    // Regex splits by tags but keeps delimiter
-    const parts = cleanText.split(/(<(?:h1|h2|h3|aya|hadith|footnote|poetry|center|bold)>.*?<\/(?:h1|h2|h3|aya|hadith|footnote|poetry|center|bold)>)/gs);
-    return parts.map((part, index) => {
-      if (part.startsWith('<h1>')) return <span key={index} className="block text-4xl font-bold text-white mb-6 mt-4 border-r-4 border-[#c5a059] pr-4 italic">{part.replace(/<\/?h1>/g, '')}</span>;
-      if (part.startsWith('<h2>')) return <span key={index} className="block text-2xl font-bold text-slate-200 mb-4 mt-3 border-r-4 border-slate-500 pr-3">{part.replace(/<\/?h2>/g, '')}</span>;
-      if (part.startsWith('<h3>')) return <span key={index} className="block text-xl font-bold text-slate-300 mb-3 mt-2 border-r-2 border-slate-600 pr-2">{part.replace(/<\/?h3>/g, '')}</span>;
-      if (part.startsWith('<center>')) return <div key={index} className="text-center font-bold text-slate-200 my-4 py-2">{part.replace(/<\/?center>/g, '')}</div>;
-      if (part.startsWith('<bold>')) return <span key={index} className="font-extrabold text-white">{part.replace(/<\/?bold>/g, '')}</span>;
-      if (part.startsWith('<aya>')) return <span key={index} className="text-[#10b981] bg-[#10b981]/10 px-1 rounded border-b border-[#10b981]/30">{part.replace(/<\/?aya>/g, '')}</span>;
-      if (part.startsWith('<hadith>')) return <span key={index} className="text-blue-400 bg-blue-500/10 px-1 rounded border-b border-blue-500/30">{part.replace(/<\/?hadith>/g, '')}</span>;
-      if (part.startsWith('<poetry>')) return <div key={index} className="text-center italic text-slate-300 my-4 py-2 border-x-2 border-slate-700 bg-slate-800/50 rounded-lg">{part.replace(/<\/?poetry>/g, '')}</div>;
-      if (part.startsWith('<footnote>')) {
-          const content = part.replace(/<\/?footnote>/g, '');
+    cleanText = cleanText
+      .replace(/<(h1)>(.*?)<\/\1>/gs, '<span class="block text-4xl font-bold text-white mb-6 mt-4 border-r-4 border-[#c5a059] pr-4 italic">$2</span>')
+      .replace(/<(h2)>(.*?)<\/\1>/gs, '<span class="block text-2xl font-bold text-slate-200 mb-4 mt-3 border-r-4 border-slate-500 pr-3">$2</span>')
+      .replace(/<(h3)>(.*?)<\/\1>/gs, '<span class="block text-xl font-bold text-slate-300 mb-3 mt-2 border-r-2 border-slate-600 pr-2">$2</span>')
+      .replace(/<center>(.*?)<\/center>/gs, '<div class="text-center font-bold text-slate-200 my-4 py-2">$1</div>')
+      .replace(/<bold>(.*?)<\/bold>/gs, '<span class="font-extrabold text-white">$1</span>')
+      .replace(/<aya>(.*?)<\/aya>/gs, '<span class="text-[#10b981] bg-[#10b981]/10 px-1 rounded border-b border-[#10b981]/30">$1</span>')
+      .replace(/<hadith>(.*?)<\/hadith>/gs, '<span class="text-blue-400 bg-blue-500/10 px-1 rounded border-b border-blue-500/30">$1</span>')
+      .replace(/<poetry>(.*?)<\/poetry>/gs, '<div class="text-center italic text-slate-300 my-4 py-2 border-x-2 border-slate-700 bg-slate-800/50 rounded-lg">$1</div>')
+      .replace(/<footnote>(.*?)<\/footnote>/gs, (match, content) => {
           const numMatch = content.match(/^(\d+):/);
-          const id = numMatch ? `fn-preview-${numMatch[1]}` : undefined;
-          return <span id={id} key={index} className="block text-lg text-slate-500 mt-4 pt-2 border-t border-slate-700 font-sans italic scroll-mt-24 transition-colors duration-500">{content}</span>;
-      }
+          const id = numMatch ? `id="fn-preview-${numMatch[1]}"` : '';
+          return `<span ${id} class="block text-lg text-slate-500 mt-4 pt-2 border-t border-slate-700 font-sans italic scroll-mt-24 transition-colors duration-500">${content}</span>`;
+      });
       
-      // Handle inline text with footnote references [1], [2], etc.
-      const textParts = part.split(/(\[\d+\])/g);
-      return (
-        <span key={index}>
-          {textParts.map((t, i) => {
-             if (t.match(/^\[\d+\]$/)) {
-                // Remove brackets to convert number, then put brackets back
-                const num = t.replace(/[\[\]]/g, '');
-                return `[${toHindi(num)}]`; // Plain text with Hindi digits
-             }
-             return t;
-          })}
-        </span>
-      );
-    });
+    // Handle inline text with footnote references [1], [2], etc.
+    // Replace bracket numbering with Hindi digits
+    cleanText = cleanText.replace(/\[(\d+)\]/g, (match, d) => `[${toHindi(d)}]`);
+
+    return <div dangerouslySetInnerHTML={{ __html: cleanText }} />;
   };
 
   if (isLoading) return (
