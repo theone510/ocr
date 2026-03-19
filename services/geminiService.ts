@@ -38,6 +38,13 @@ export const analyzeManuscript = async (base64Image: string, mimeType: string): 
     if (!textValue) {
       console.error("Gemini Raw Response:", JSON.stringify(response, null, 2));
       const finishReason = response.candidates?.[0]?.finishReason;
+      
+      // If the model finished normally but returned no text, it likely means the page is blank or has no recognizable text.
+      // We return an empty string so that batch processing continues instead of failing.
+      if (finishReason === 'STOP') {
+        return "";
+      }
+
       let errMsg = "No text was extracted from the image.";
       if (finishReason) {
         errMsg += ` (Reason: ${finishReason})`;
