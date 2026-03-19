@@ -31,12 +31,21 @@ export const analyzeManuscript = async (base64Image: string, mimeType: string): 
       },
     });
 
-    // Access text property directly from GenerateContentResponse
-    if (!response.text) {
-      throw new Error("No text was extracted from the image.");
+    // Access text property directly or via function depending on genai SDK version
+    // Use 'any' cast to prevent TypeScript from complaining if it thinks text is strictly a string getter
+    const textValue = typeof (response as any).text === 'function' ? (response as any).text() : response.text;
+
+    if (!textValue) {
+      console.error("Gemini Raw Response:", JSON.stringify(response, null, 2));
+      const finishReason = response.candidates?.[0]?.finishReason;
+      let errMsg = "No text was extracted from the image.";
+      if (finishReason) {
+        errMsg += ` (Reason: ${finishReason})`;
+      }
+      throw new Error(errMsg);
     }
 
-    return response.text;
+    return textValue;
   } catch (error) {
     console.error("Gemini Analysis Error:", error);
     throw error;
