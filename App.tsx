@@ -1139,17 +1139,43 @@ const FullBookViewer: React.FC<{
     setToc(extractedToc);
   }, [book]);
 
-  const changePage = (index: number) => {
+  const changePage = (index: number, targetHeadingTitle?: string) => {
     if (index < 0 || index >= totalPages) return;
     
     setActivePageIndex(index);
     
-    // Always reset to top when changing pages manually
     setTimeout(() => {
-        if (scrollRef.current) {
-            scrollRef.current.scrollTop = 0;
+        if (mode === 'read') {
+            if (scrollRef.current) scrollRef.current.scrollTop = 0;
+            if (targetHeadingTitle) {
+                const headings = document.querySelectorAll('.viewer-h1, .viewer-h2, .viewer-h3, .viewer-h4, .viewer-h5');
+                const target = Array.from(headings).find(h => h.textContent === toHindi(targetHeadingTitle));
+                if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
+        } else {
+            // Edit mode continuous editor scroll
+            const edScroll = document.getElementById('tiptap-scroll-container');
+            if (edScroll) {
+                if (targetHeadingTitle) {
+                    const headings = edScroll.querySelectorAll('.ProseMirror h1, .ProseMirror h2, .ProseMirror h3, .ProseMirror h4, .ProseMirror h5');
+                    const target = Array.from(headings).find(h => h.textContent === targetHeadingTitle);
+                    if (target) {
+                        target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                        return;
+                    }
+                }
+                const targetPageNum = book.pages[index]?.pageNumber.toString();
+                if (targetPageNum) {
+                    const targetBreak = Array.from(edScroll.querySelectorAll('.page-break')).find(b => b.getAttribute('data-page-number') === targetPageNum);
+                    if (targetBreak) {
+                        targetBreak.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    } else if (index === 0) {
+                        edScroll.scrollTop = 0;
+                    }
+                }
+            }
         }
-    }, 50);
+    }, 100);
   };
 
   const handleChangeHeadingLevel = (item: any, newLevel: number) => {
@@ -1196,6 +1222,22 @@ const FullBookViewer: React.FC<{
           onUpdatePage(book.title, page.id, finalText);
       } else {
           alert('الدمج بين العناوين في صفحات مختلفة غير مدعوم من الفهرس السريع، استخدم المحرر המتصل.');
+      }
+  };
+
+  const handleRemoveHeading = (item: any) => {
+      const page = book.pages.find(p => p.pageNumber === item.page);
+      if (!page) return;
+      
+      const newText = page.text.replace(/<(h[1-5])>(.*?)<\/\1>/g, (match, tag, title) => {
+          const cleanTitle = title.replace(/<[^>]+>/g, '').trim();
+          if (cleanTitle === item.title) {
+              return title; // return inner text without tags
+          }
+          return match;
+      });
+      if (newText !== page.text) {
+          onUpdatePage(book.title, page.id, newText);
       }
   };
 
@@ -1346,7 +1388,7 @@ const FullBookViewer: React.FC<{
             {toc.length === 0 ? <p className="text-center text-slate-600 text-sm mt-10">لم يتم رصد عناوين في المتن</p> : toc.map((item, i) => (
                 <div key={i} className={`w-full text-right flex flex-col gap-1 p-3 rounded-xl transition-all border border-transparent group ${activePageIndex === item.index ? 'bg-[#c5a059]/20 border-[#c5a059]/30' : 'hover:bg-slate-800/50 hover:border-slate-700'} ${item.level === 1 ? 'mt-4 bg-slate-800/30' : ''}`}>
                   <button 
-                      onClick={() => changePage(item.index)}
+                      onClick={() => changePage(item.index, item.title)}
                       className="w-full text-right flex flex-col"
                   >
                      <span className={`font-bold leading-snug ${item.level === 1 ? 'text-sm text-[#c5a059]' : item.level === 2 ? 'text-[13px] pr-4 text-slate-300' : 'text-[12px] pr-8 text-slate-500'}`}>{toHindi(item.title)}</span>
@@ -1362,6 +1404,7 @@ const FullBookViewer: React.FC<{
                          <button onClick={(e) => { e.stopPropagation(); handleChangeHeadingLevel(item, 4) }} className="text-[10px] bg-slate-700 px-1 py-0.5 rounded text-slate-300 hover:bg-slate-500 hover:text-slate-900 font-bold transition-colors">H4</button>
                          <button onClick={(e) => { e.stopPropagation(); handleChangeHeadingLevel(item, 5) }} className="text-[10px] bg-slate-700 px-1 py-0.5 rounded text-slate-300 hover:bg-slate-600 hover:text-slate-900 font-bold transition-colors">H5</button>
                          <button onClick={(e) => { e.stopPropagation(); handleMergeWithNextHeading(item) }} className="text-[10px] bg-blue-900/50 border border-blue-500/30 px-1.5 py-0.5 rounded text-blue-300 hover:bg-blue-600 hover:text-white font-bold transition-colors ml-1" title="دمج مع العنوان التالي بالأسفل">دمج</button>
+                         <button onClick={(e) => { e.stopPropagation(); handleRemoveHeading(item) }} className="text-[10px] bg-red-900/50 border border-red-500/30 px-1.5 py-0.5 rounded text-red-300 hover:bg-red-600 hover:text-white font-bold transition-colors ml-1" title="إزالة العنوان وتحويله لنص عادي">حذف</button>
                       </div>
                   )}
                 </div>
