@@ -10,6 +10,8 @@ import { ResultDisplay } from './components/ResultDisplay';
 import { SessionSetup } from './components/SessionSetup';
 import { BatchControls } from './components/BatchControls';
 import { Button } from './components/Button';
+import { ContinuousEditor } from './components/editor/ContinuousEditor';
+import { extractPagesFromHTML } from './components/editor/EditorUtils';
 import { 
   ScrollText, 
   BookOpen, 
@@ -477,6 +479,29 @@ const App: React.FC = () => {
     });
   };
 
+  const handleToggleBookStatus = (bookTitle: string) => {
+    setLibrary(prev => {
+      const book = prev.books[bookTitle];
+      if (!book) return prev;
+      const newStatus = book.status === 'published' ? 'draft' : 'published';
+      return { ...prev, books: { ...prev.books, [bookTitle]: { ...book, status: newStatus as any } } };
+    });
+  };
+
+  const handleUpdateWholeBook = (bookTitle: string, parsedPages: {id: string, text: string}[]) => {
+    setLibrary(prev => {
+      const book = prev.books[bookTitle];
+      if (!book) return prev;
+      
+      const updatedPages = book.pages.map(p => {
+        const matchingParsed = parsedPages.find(pp => pp.id === p.id);
+        return matchingParsed ? { ...p, text: matchingParsed.text } : p;
+      });
+      
+      return { ...prev, books: { ...prev.books, [bookTitle]: { ...book, pages: updatedPages } } };
+    });
+  };
+
   const handlePageNumberEdit = (bookTitle: string, pageId: string, newNumber: number) => {
     setLibrary(prev => {
       const book = prev.books[bookTitle];
@@ -707,6 +732,8 @@ const App: React.FC = () => {
             initialMode={viewerMode}
             onClose={() => setView('library')} 
             onUpdatePage={handleUpdateBookPage}
+            onUpdateWholeBook={handleUpdateWholeBook}
+            onToggleStatus={() => handleToggleBookStatus(viewingBookTitle)}
           />
         )}
       </main>
@@ -1014,10 +1041,14 @@ const LibraryView: React.FC<{
                    </button>
                 </div>
               </div>
+              <div className="flex items-center gap-2 mb-2">
+                 <h3 className="text-xl font-bold text-white line-clamp-1">{toHindi(book.title)}</h3>
+                 <span className={`px-2 py-0.5 rounded text-[10px] font-bold tracking-wider ${book.status === 'published' ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-amber-500/10 text-amber-500 border border-amber-500/20'}`}>
+                    {book.status === 'published' ? 'مُعتمد' : 'مسودة'}
+                 </span>
+              </div>
               
-              <h3 className="text-xl font-bold text-white mb-2 line-clamp-2">{toHindi(book.title)}</h3>
-              
-              <div className="space-y-2 text-sm text-slate-400 mb-6">
+              <div className="space-y-2 text-sm text-slate-400 mb-6 font-mono">
                 {book.author && <div className="flex items-center gap-2"><User size={14}/> <span>{toHindi(book.author)}</span></div>}
                 {book.publisher && <div className="flex items-center gap-2"><Building2 size={14}/> <span>{toHindi(book.publisher)}</span></div>}
                 <div className="flex items-center gap-2"><FileText size={14}/> <span>{toHindi(book.pages.length)} صفحة مؤرشفة</span></div>
@@ -1052,12 +1083,20 @@ const FullBookViewer: React.FC<{
   book: Book, 
   initialMode: 'read' | 'edit',
   onClose: () => void, 
-  onUpdatePage: (bookTitle: string, pageId: string, text: string) => void
-}> = ({ book, initialMode, onClose, onUpdatePage }) => {
+  onUpdatePage: (bookTitle: string, pageId: string, text: string) => void,
+  onUpdateWholeBook: (bookTitle: string, parsedPages: {id: string, text: string}[]) => void,
+  onToggleStatus: () => void
+}> = ({ book, initialMode, onClose, onUpdatePage, onUpdateWholeBook, onToggleStatus }) => {
   const [toc, setToc] = useState<{id: string, title: string, level: number, page: number, index: number}[]>([]);
   const [showSidebar, setShowSidebar] = useState(true);
   const [mode, setMode] = useState<'read' | 'edit'>(initialMode);
   
+  // SYNC VIEW STATE (Local Only)
+  const [syncPdfDoc, setSyncPdfDoc] = useState<PDFDocumentProxy | null>(null);
+  const [syncImageUrl, setSyncImageUrl] = useState<string | null>(null);
+  const [isSyncingPdf, setIsSyncingPdf] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
   // PAGE FLIPPING LOGIC
   const [activePageIndex, setActivePageIndex] = useState(0);
   const totalPages = book.pages.length;
@@ -1084,7 +1123,7 @@ const FullBookViewer: React.FC<{
   useEffect(() => {
     const extractedToc: any[] = [];
     book.pages.forEach((p, idx) => {
-      const matches = p.text.matchAll(/<(h[1-3])>(.*?)<\/\1>/g);
+      const matches = p.text.matchAll(/<(h[1-5])>(.*?)<\/\1>/g);
       for (const match of matches) {
         // Strip nested tags like <bold> or <center> from the heading text for the index
         const cleanTitle = match[2].replace(/<[^>]+>/g, '').trim();
@@ -1113,6 +1152,53 @@ const FullBookViewer: React.FC<{
     }, 50);
   };
 
+  const handleChangeHeadingLevel = (item: any, newLevel: number) => {
+      const page = book.pages.find(p => p.pageNumber === item.page);
+      if (!page) return;
+      
+      const newText = page.text.replace(/<(h[1-5])>(.*?)<\/\1>/g, (match, tag, title) => {
+          const cleanTitle = title.replace(/<[^>]+>/g, '').trim();
+          if (cleanTitle === item.title) {
+              return `<h${newLevel}>${title}</h${newLevel}>`;
+          }
+          return match;
+      });
+      if (newText !== page.text) {
+          onUpdatePage(book.title, page.id, newText);
+      }
+  };
+
+  const handleMergeWithNextHeading = (item: any) => {
+      const currentIdx = toc.findIndex(t => t === item);
+      if (currentIdx === -1 || currentIdx + 1 >= toc.length) return;
+      const nextItem = toc[currentIdx + 1];
+      
+      if (item.page === nextItem.page) {
+          const page = book.pages.find(p => p.pageNumber === item.page);
+          if (!page) return;
+          
+          let firstFound = false;
+          let mergedTitleInner = '';
+          const tempText = page.text.replace(/<(h[1-5])>(.*?)<\/\1>/g, (match, tag, title) => {
+              const cleanTitle = title.replace(/<[^>]+>/g, '').trim();
+              if (cleanTitle === item.title && !firstFound) {
+                  firstFound = true;
+                  mergedTitleInner = title;
+                  return `___MERGE_TARGET___`; 
+              }
+              if (cleanTitle === nextItem.title && firstFound) {
+                  return `<${tag}>${mergedTitleInner} - ${title}</${tag}>`;
+              }
+              return match;
+          });
+          
+          const finalText = tempText.replace(`___MERGE_TARGET___\\s*\\n*`, '').replace(`___MERGE_TARGET___`, '');
+          onUpdatePage(book.title, page.id, finalText);
+      } else {
+          alert('الدمج بين العناوين في صفحات مختلفة غير مدعوم من الفهرس السريع، استخدم المحرر המتصل.');
+      }
+  };
+
   const handleNextPage = () => changePage(activePageIndex + 1);
   const handlePrevPage = () => changePage(activePageIndex - 1);
 
@@ -1126,7 +1212,7 @@ const FullBookViewer: React.FC<{
     let pageHtml = currentPageData.text
         .replace(/(?:\r\n|\r|\n)+\s*(\[\d+\])/g, ' $1') // FIX: Aggressive collapse
         .replace(/\n+/g, '<br/>')
-        .replace(/<(h[1-3])>(.*?)<\/\1>/g, (match, tag, title) => {
+        .replace(/<(h[1-5])>(.*?)<\/\1>/g, (match, tag, title) => {
           const id = `heading-${headingIdx++}`;
           return `<${tag} id="${id}" class="viewer-${tag}">${toHindi(title)}</${tag}>`;
         })
@@ -1153,12 +1239,59 @@ const FullBookViewer: React.FC<{
     );
   };
 
+  const handleContinuousEditorChange = (html: string) => {
+      // Split the HTML using extractPagesFromHTML
+      const extractedPages = extractPagesFromHTML(html, book.pages);
+      onUpdateWholeBook(book.title, extractedPages);
+  };
+
+  const handleEditorActivePageChange = (pageNum: number) => {
+      const index = book.pages.findIndex(p => p.pageNumber === pageNum);
+      if (index >= 0 && index !== activePageIndex) {
+          setActivePageIndex(index);
+      }
+  };
+
+  const handleUploadSyncPdf = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setIsSyncingPdf(true);
+    try {
+      const pdf = await loadPDF(file);
+      setSyncPdfDoc(pdf);
+    } catch(err) {
+      console.error(err);
+      alert('فشل تحميل الـ PDF المرجعي للاستلام المؤقت.');
+    }
+    setIsSyncingPdf(false);
+  };
+
+  useEffect(() => {
+     if (syncPdfDoc && mode === 'edit') {
+         const renderPdfSync = async () => {
+             // Assuming user wants to sync with logical page number
+             const pageNum = book.pages[activePageIndex]?.pageNumber || activePageIndex + 1;
+             try {
+                const result = await renderPageAsImage(syncPdfDoc, pageNum);
+                setSyncImageUrl(result.previewUrl);
+             } catch(err) {
+                console.error("Failed to render sync page", err);
+                // Fallback to empty if it exceeds bounds or fails
+                setSyncImageUrl(null);
+             }
+         };
+         renderPdfSync();
+     }
+  }, [syncPdfDoc, activePageIndex, mode, book.pages]);
+
   return (
     <div className="flex h-screen bg-slate-950 overflow-hidden relative" dir="rtl">
       <style>{`
         .viewer-h1 { display: block; font-size: 2.5rem; font-weight: 800; color: #f1f5f9; margin: 1.5rem 0; border-right: 6px solid #c5a059; padding-right: 1.5rem; }
         .viewer-h2 { display: block; font-size: 1.8rem; font-weight: 700; color: #e2e8f0; margin: 1.2rem 0; border-right: 4px solid #94a3b8; padding-right: 1rem; }
         .viewer-h3 { display: block; font-size: 1.4rem; font-weight: 700; color: #cbd5e1; margin: 1rem 0; border-right: 2px solid #64748b; padding-right: 0.75rem; }
+        .viewer-h4 { display: block; font-size: 1.2rem; font-weight: 700; color: #94a3b8; margin: 0.8rem 0; border-right: 2px solid #475569; padding-right: 0.5rem; }
+        .viewer-h5 { display: block; font-size: 1rem; font-weight: 700; color: #64748b; margin: 0.6rem 0; border-right: 2px solid #334155; padding-right: 0.5rem; }
         .viewer-center { display: block; text-align: center; margin: 1.5rem 0; font-weight: bold; font-size: 1.4rem; color: #e2e8f0; }
         .viewer-bold { font-weight: 800; color: #fff; }
         .viewer-aya { color: #10b981; background: rgba(16, 185, 129, 0.1); padding: 0 4px; border-radius: 4px; border-bottom: 2px solid #059669; }
@@ -1211,14 +1344,27 @@ const FullBookViewer: React.FC<{
           </div>
           <div className="flex-1 overflow-y-auto p-4 space-y-1 scrollbar-thin scrollbar-thumb-slate-700">
             {toc.length === 0 ? <p className="text-center text-slate-600 text-sm mt-10">لم يتم رصد عناوين في المتن</p> : toc.map((item, i) => (
-                <button 
-                    key={i} 
-                    onClick={() => changePage(item.index)}
-                    className={`w-full text-right flex flex-col gap-1 p-3 rounded-xl transition-all border border-transparent group ${activePageIndex === item.index ? 'bg-[#c5a059]/20 border-[#c5a059]/30' : 'hover:bg-slate-800/50 hover:border-slate-700'} ${item.level === 1 ? 'mt-4 bg-slate-800/30' : ''}`}
-                >
-                  <span className={`font-bold leading-snug ${item.level === 1 ? 'text-sm text-[#c5a059]' : item.level === 2 ? 'text-[13px] pr-4 text-slate-300' : 'text-[12px] pr-8 text-slate-500'}`}>{toHindi(item.title)}</span>
-                  <span className="text-[10px] text-slate-600 font-bold self-end group-hover:text-[#c5a059] transition-colors font-mono">ص {toHindi(item.page)}</span>
-                </button>
+                <div key={i} className={`w-full text-right flex flex-col gap-1 p-3 rounded-xl transition-all border border-transparent group ${activePageIndex === item.index ? 'bg-[#c5a059]/20 border-[#c5a059]/30' : 'hover:bg-slate-800/50 hover:border-slate-700'} ${item.level === 1 ? 'mt-4 bg-slate-800/30' : ''}`}>
+                  <button 
+                      onClick={() => changePage(item.index)}
+                      className="w-full text-right flex flex-col"
+                  >
+                     <span className={`font-bold leading-snug ${item.level === 1 ? 'text-sm text-[#c5a059]' : item.level === 2 ? 'text-[13px] pr-4 text-slate-300' : 'text-[12px] pr-8 text-slate-500'}`}>{toHindi(item.title)}</span>
+                     <span className="text-[10px] text-slate-600 font-bold self-end group-hover:text-[#c5a059] transition-colors font-mono mt-1">ص {toHindi(item.page)}</span>
+                  </button>
+
+                  {/* QUICK EDIT TOOLS FOR TOC */}
+                  {mode === 'edit' && (
+                      <div className="flex items-center justify-end gap-1 mt-2 opacity-0 group-hover:opacity-100 transition-opacity flex-wrap">
+                         <button onClick={(e) => { e.stopPropagation(); handleChangeHeadingLevel(item, 1) }} className="text-[10px] bg-slate-700 px-1 py-0.5 rounded text-slate-300 hover:bg-[#c5a059] hover:text-slate-900 font-bold transition-colors">H1</button>
+                         <button onClick={(e) => { e.stopPropagation(); handleChangeHeadingLevel(item, 2) }} className="text-[10px] bg-slate-700 px-1 py-0.5 rounded text-slate-300 hover:bg-slate-300 hover:text-slate-900 font-bold transition-colors">H2</button>
+                         <button onClick={(e) => { e.stopPropagation(); handleChangeHeadingLevel(item, 3) }} className="text-[10px] bg-slate-700 px-1 py-0.5 rounded text-slate-300 hover:bg-slate-400 hover:text-slate-900 font-bold transition-colors">H3</button>
+                         <button onClick={(e) => { e.stopPropagation(); handleChangeHeadingLevel(item, 4) }} className="text-[10px] bg-slate-700 px-1 py-0.5 rounded text-slate-300 hover:bg-slate-500 hover:text-slate-900 font-bold transition-colors">H4</button>
+                         <button onClick={(e) => { e.stopPropagation(); handleChangeHeadingLevel(item, 5) }} className="text-[10px] bg-slate-700 px-1 py-0.5 rounded text-slate-300 hover:bg-slate-600 hover:text-slate-900 font-bold transition-colors">H5</button>
+                         <button onClick={(e) => { e.stopPropagation(); handleMergeWithNextHeading(item) }} className="text-[10px] bg-blue-900/50 border border-blue-500/30 px-1.5 py-0.5 rounded text-blue-300 hover:bg-blue-600 hover:text-white font-bold transition-colors ml-1" title="دمج مع العنوان التالي بالأسفل">دمج</button>
+                      </div>
+                  )}
+                </div>
             ))}
           </div>
         </aside>
@@ -1228,17 +1374,38 @@ const FullBookViewer: React.FC<{
       <div className="flex-1 relative flex flex-col bg-slate-950 overflow-hidden">
         
         {/* Top Info Bar */}
-        <div className="bg-slate-900/80 backdrop-blur-md border-b border-white/5 px-8 py-4 flex items-center justify-between z-10">
+        <div className="bg-slate-900/80 backdrop-blur-md border-b border-white/5 px-8 py-4 flex items-center justify-between z-10 transition-all">
            <div className="flex flex-col">
-              <h1 className="text-xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-white to-slate-400 tracking-tight">{toHindi(book.title)}</h1>
-              <div className="flex items-center gap-2 text-xs text-slate-500 font-mono">
+              <div className="flex items-center gap-3">
+                 <h1 className="text-xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-white to-slate-400 tracking-tight">{toHindi(book.title)}</h1>
+                 <button 
+                     onClick={onToggleStatus} 
+                     className={`px-2 py-0.5 rounded text-[10px] font-bold tracking-wider transition-colors ${book.status === 'published' ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/50 hover:bg-emerald-500/30' : 'bg-amber-500/20 text-amber-500 border border-amber-500/50 hover:bg-amber-500/30'}`}
+                     title="اضغط لتغيير حالة الاعتماد"
+                 >
+                    {book.status === 'published' ? 'معتمد 100%' : 'قيد التدقيق (مسودة)'}
+                 </button>
+              </div>
+              <div className="flex items-center gap-2 text-xs text-slate-500 font-mono mt-1">
                  <span>{toHindi(book.publisher)}</span>
                  <span className="w-1 h-1 bg-slate-600 rounded-full"></span>
                  <span className={activePageIndex === totalPages - 1 ? 'text-emerald-500' : ''}>Page {toHindi(currentPageData?.pageNumber)} of {toHindi(totalPages)}</span>
+                 {mode === 'edit' && (
+                     <>
+                        <span className="w-1 h-1 bg-slate-600 rounded-full mx-1"></span>
+                        <input type="file" ref={fileInputRef} accept="application/pdf" className="hidden" onChange={handleUploadSyncPdf} />
+                        <button 
+                            onClick={() => syncPdfDoc ? setSyncPdfDoc(null) : fileInputRef.current?.click()}
+                            className={`flex items-center gap-1.5 px-2 py-0.5 rounded border transition-colors ${syncPdfDoc ? 'bg-red-500/10 text-red-400 border-red-500/30 hover:bg-red-500/20' : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'}`}
+                        >
+                            {isSyncingPdf ? <span className="animate-pulse">جاري التحميل...</span> : syncPdfDoc ? <><X size={12}/> إغلاق المرفق</> : <><Upload size={12}/> إرفاق PDF للمطابقة</>}
+                        </button>
+                     </>
+                 )}
               </div>
            </div>
            
-           <div className="flex items-center gap-2 bg-slate-900 p-1 rounded-lg border border-slate-800">
+           <div className="flex items-center gap-2 bg-slate-900 p-1 rounded-lg border border-slate-800 shadow-inner">
                 <button onClick={() => setMode('read')} className={`px-4 py-2 rounded-md text-sm font-bold transition-all ${mode === 'read' ? 'bg-[#c5a059] text-slate-900 shadow' : 'text-slate-500 hover:bg-slate-800'}`}>
                     <span className="flex items-center gap-2"><BookOpenCheck size={16}/> قراءة</span>
                 </button>
@@ -1248,32 +1415,45 @@ const FullBookViewer: React.FC<{
             </div>
         </div>
 
-        {/* Scrollable Page Content */}
-        <div 
-            ref={scrollRef}
-            className="flex-1 overflow-y-auto scroll-smooth pb-32" // Added pb-32 for dock space
-        > 
-            <div className={`mx-auto py-4 px-4 transition-all duration-300 ${showSidebar ? 'max-w-4xl' : 'max-w-5xl'}`}>
-                {mode === 'read' ? (
-                    renderReadMode()
-                ) : (
-                    <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
-                       {currentPageData && (
-                        <div className="bg-slate-900 border border-slate-800 shadow-xl rounded-2xl overflow-hidden min-h-[70vh]">
-                            <ResultDisplay 
-                                text={currentPageData.text}
-                                isLoading={false}
-                                error={null}
-                                pageNumber={currentPageData.pageNumber}
-                                bookTitle={book.title}
-                                onTextChange={(val) => onUpdatePage(book.title, currentPageData.id, val)}
-                                isAutoSaved={false}
-                                enableStickyHeader={true}
+        <div className="flex-1 flex overflow-hidden">
+            {/* OPTIONAL SPLIT VIEW FOR PDF SYNC */}
+            {syncPdfDoc && mode === 'edit' && (
+                <div className="hidden lg:flex flex-col w-1/2 border-l border-slate-800 bg-slate-950 p-4 overflow-y-auto animate-in fade-in slide-in-from-left duration-500">
+                    <div className="text-center mb-2 flex items-center justify-center gap-2 text-slate-500 text-sm font-bold bg-slate-900 py-2 rounded-lg border border-slate-800 shadow-inner">
+                        <MonitorDown size={16} className="text-[#c5a059]" /> النص الأصلي المرفق - صفحة {toHindi(book.pages[activePageIndex]?.pageNumber)}
+                    </div>
+                    <div className="flex-1 flex items-center justify-center bg-slate-900 rounded-xl border border-slate-800 overflow-hidden shadow-2xl p-2 relative">
+                        {syncImageUrl ? (
+                            <img src={syncImageUrl} className="max-w-full max-h-full object-contain rounded drop-shadow-lg pointer-events-none select-none" alt="Manuscript Source" />
+                        ) : (
+                            <div className="flex flex-col items-center text-slate-600 animate-pulse">
+                                <BookCopy size={32} className="mb-2 opacity-50" />
+                                <span>جاري معالجة صورة الصفحة...</span>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            )}
+
+            {/* Scrollable Page / Editor Content */}
+            <div 
+                ref={scrollRef}
+                className={`flex-1 ${mode === 'read' ? 'overflow-y-auto pb-32' : 'overflow-hidden'} scroll-smooth transition-all ${syncPdfDoc && mode === 'edit' ? 'lg:w-1/2' : 'w-full'}`}
+            > 
+                <div className={`mx-auto transition-all duration-300 ${mode === 'edit' ? 'h-full w-full flex flex-col' : (showSidebar ? 'py-4 px-4 max-w-4xl' : 'py-4 px-4 max-w-5xl')}`}>
+                    {mode === 'read' ? (
+                        renderReadMode()
+                    ) : (
+                        <div className="animate-in fade-in slide-in-from-bottom-4 duration-500 flex-1 h-full w-full flex flex-col p-4">
+                            <ContinuousEditor 
+                                pages={book.pages} 
+                                onChange={handleContinuousEditorChange}
+                                onActivePageChange={handleEditorActivePageChange}
+                                readOnly={false} 
                             />
                         </div>
-                       )}
-                    </div>
-                )}
+                    )}
+                </div>
             </div>
         </div>
 

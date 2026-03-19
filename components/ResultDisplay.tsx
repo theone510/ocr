@@ -3,7 +3,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   Copy, Check, FileText, Pencil, Save, X, 
   Music, MessageSquarePlus,
-  Heading1, Heading2, Heading3, Sparkles, Quote,
+  Heading1, Heading2, Heading3, Heading4, Heading5, Sparkles, Quote,
   Eraser, AlignCenter, Bold
 } from 'lucide-react';
 import { Button } from './Button';
@@ -143,7 +143,7 @@ export const ResultDisplay: React.FC<ResultDisplayProps> = ({
 
   const handleCancel = () => setIsEditing(false);
 
-  const applyFormatting = (type: 'h1' | 'h2' | 'h3' | 'aya' | 'hadith' | 'footnote' | 'poetry' | 'center' | 'bold') => {
+  const applyFormatting = (type: 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'aya' | 'hadith' | 'footnote' | 'poetry' | 'center' | 'bold') => {
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return;
     const range = selection.getRangeAt(0);
@@ -169,19 +169,16 @@ export const ResultDisplay: React.FC<ResultDisplayProps> = ({
     } else {
       const content = range.extractContents();
       let wrapper: HTMLElement;
-      if (['h1', 'h2', 'h3', 'center', 'poetry'].includes(type)) {
+      if (['h1', 'h2', 'h3', 'h4', 'h5', 'center', 'poetry'].includes(type)) {
         wrapper = document.createElement('div');
         if(type === 'center') {
              wrapper.className = 'editor-center';
         } else if(type === 'poetry') {
              wrapper.className = 'editor-poetry';
         } else {
-             // For h1, h2, h3 we use headers in DOM for editing usually, but to keep consistent with deserializer:
-             // Note: In deserialize we use actual <h1> etc tags. 
-             // To properly emulate execCommand formatBlock we can do this, but manual wrapping works too.
-             // Let's stick to the class-based approach matching deserialize for custom things
-             // But for headings, let's try to actually create the element
-             wrapper = document.createElement(type === 'h1' ? 'h1' : (type === 'h2' ? 'h2' : 'h3'));
+             // For headings, let's try to actually create the element
+             const headingTypes: Record<string, string> = { 'h1': 'h1', 'h2': 'h2', 'h3': 'h3', 'h4': 'h4', 'h5': 'h5' };
+             wrapper = document.createElement(headingTypes[type]);
              wrapper.className = `editor-${type}`;
         }
       } else {
@@ -212,7 +209,7 @@ export const ResultDisplay: React.FC<ResultDisplayProps> = ({
 
     // Helper to find closest styled parent inside the editor
     const element = node as HTMLElement;
-    const styledParent = element.closest('.editor-h1, .editor-h2, .editor-h3, .editor-aya, .editor-hadith, .editor-poetry, .editor-footnote, .editor-ref, .editor-center, .editor-bold');
+    const styledParent = element.closest('.editor-h1, .editor-h2, .editor-h3, .editor-h4, .editor-h5, .editor-aya, .editor-hadith, .editor-poetry, .editor-footnote, .editor-ref, .editor-center, .editor-bold');
     
     if (styledParent && editorRef.current?.contains(styledParent)) {
         const parent = styledParent.parentNode;
@@ -241,6 +238,8 @@ export const ResultDisplay: React.FC<ResultDisplayProps> = ({
       .replace(/<(h1)>(.*?)<\/\1>/gs, '<span class="block text-4xl font-bold text-white mb-6 mt-4 border-r-4 border-[#c5a059] pr-4 italic">$2</span>')
       .replace(/<(h2)>(.*?)<\/\1>/gs, '<span class="block text-2xl font-bold text-slate-200 mb-4 mt-3 border-r-4 border-slate-500 pr-3">$2</span>')
       .replace(/<(h3)>(.*?)<\/\1>/gs, '<span class="block text-xl font-bold text-slate-300 mb-3 mt-2 border-r-2 border-slate-600 pr-2">$2</span>')
+      .replace(/<(h4)>(.*?)<\/\1>/gs, '<span class="block text-lg font-bold text-slate-400 mb-2 mt-2 border-r-2 border-slate-700 pr-2">$2</span>')
+      .replace(/<(h5)>(.*?)<\/\1>/gs, '<span class="block text-base font-bold text-slate-500 mb-2 mt-1 border-r-2 border-slate-800 pr-2">$2</span>')
       .replace(/<center>(.*?)<\/center>/gs, '<div class="text-center font-bold text-slate-200 my-4 py-2">$1</div>')
       .replace(/<bold>(.*?)<\/bold>/gs, '<span class="font-extrabold text-white">$1</span>')
       .replace(/<aya>(.*?)<\/aya>/gs, '<span class="text-[#10b981] bg-[#10b981]/10 px-1 rounded border-b border-[#10b981]/30">$1</span>')
@@ -279,6 +278,8 @@ export const ResultDisplay: React.FC<ResultDisplayProps> = ({
         .editor-container h1, .editor-h1 { display: block; font-size: 2.25rem; font-weight: 700; color: #f1f5f9; margin: 0.5rem 0; border-right: 4px solid #c5a059; padding-right: 1rem; text-align: right; }
         .editor-container h2, .editor-h2 { display: block; font-size: 1.5rem; font-weight: 700; color: #e2e8f0; margin: 0.4rem 0; border-right: 4px solid #94a3b8; padding-right: 0.75rem; text-align: right; }
         .editor-container h3, .editor-h3 { display: block; font-size: 1.25rem; font-weight: 700; color: #cbd5e1; margin: 0.3rem 0; border-right: 2px solid #64748b; padding-right: 0.5rem; text-align: right; }
+        .editor-container h4, .editor-h4 { display: block; font-size: 1.125rem; font-weight: 700; color: #94a3b8; margin: 0.3rem 0; border-right: 2px solid #475569; padding-right: 0.5rem; text-align: right; }
+        .editor-container h5, .editor-h5 { display: block; font-size: 1rem; font-weight: 700; color: #64748b; margin: 0.3rem 0; border-right: 2px solid #334155; padding-right: 0.5rem; text-align: right; }
         .editor-center { display: block; text-align: center; margin: 1rem 0; font-weight: bold; color: #e2e8f0; }
         .editor-bold { font-weight: bold; color: #fff; }
         .editor-aya { color: #10b981; background-color: rgba(16, 185, 129, 0.1); border-bottom: 1px solid rgba(16, 185, 129, 0.3); padding: 0 4px; border-radius: 4px; }
@@ -292,7 +293,7 @@ export const ResultDisplay: React.FC<ResultDisplayProps> = ({
       `}</style>
 
       {/* Compact Header & Toolbar */}
-      <div className={`${enableStickyHeader ? 'sticky top-[64px]' : ''} z-40 flex flex-col md:flex-row md:items-center justify-between px-4 py-3 border-b border-white/5 bg-slate-900/95 backdrop-blur shadow-md gap-3`}>
+      <div className="sticky top-0 z-50 flex flex-col md:flex-row md:items-center justify-between px-4 py-3 border-b border-white/5 bg-slate-900/95 backdrop-blur shadow-md gap-3">
         <div className="flex items-center gap-1 md:gap-3 flex-wrap">
           {isEditing ? (
             <div className="flex items-center gap-1 bg-slate-800 p-1 rounded-xl border border-white/5 flex-wrap">
@@ -304,6 +305,12 @@ export const ResultDisplay: React.FC<ResultDisplayProps> = ({
               </button>
               <button onClick={() => applyFormatting('h3')} className="toolbar-btn" title="عنوان 3">
                 <Heading3 size={16} /> <span>ع{toHindi(3)}</span>
+              </button>
+              <button onClick={() => applyFormatting('h4')} className="toolbar-btn text-slate-400" title="عنوان 4">
+                <Heading4 size={14} /> <span>ع{toHindi(4)}</span>
+              </button>
+              <button onClick={() => applyFormatting('h5')} className="toolbar-btn text-slate-500" title="عنوان 5">
+                <Heading5 size={14} /> <span>ع{toHindi(5)}</span>
               </button>
               <div className="w-[1px] h-4 bg-slate-700 mx-1"></div>
               <button onClick={() => applyFormatting('center')} className="toolbar-btn" title="توسيط">
