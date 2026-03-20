@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { PageData, Book, LibraryState, UploadedImage, LoadingState } from './types';
 import { analyzeManuscript } from './services/geminiService';
-import { auth, loginWithGoogle, logoutUser, syncLibraryToFirestore, loadLibraryFromFirestore } from './services/firebaseService';
+import { auth, loginWithGoogle, logoutUser, syncLibraryToFirestore, loadLibraryFromFirestore, fetchPublicBooks, publishBookToPublic, unpublishBookFromPublic } from './services/firebaseService';
 import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
 import { loadPDF, renderPageAsImage, PDFDocumentProxy } from './services/pdfService';
 import { ImageUploader } from './components/ImageUploader';
@@ -113,6 +113,17 @@ const App: React.FC = () => {
   });
 
   useEffect(() => {
+    fetchPublicBooks().then(publicBooks => {
+      if (Object.keys(publicBooks).length > 0) {
+        setLibrary(prev => ({
+          ...prev,
+          books: { ...publicBooks, ...prev.books }
+        }));
+      }
+    }).catch(e => console.error(e));
+  }, []);
+
+  useEffect(() => {
     if (!auth) {
       setIsAuthChecking(false);
       return;
@@ -145,7 +156,13 @@ const App: React.FC = () => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(library));
       if (firebaseUser && isCloudLoadedRef.current) {
-        syncLibraryToFirestore(firebaseUser.uid, library).catch(e => console.error(e));
+        const privateLibrary = { 
+          ...library, 
+          books: Object.fromEntries(
+            Object.entries(library.books).filter(([_, b]) => !b.ownerId || b.ownerId === firebaseUser.uid)
+          ) 
+        };
+        syncLibraryToFirestore(firebaseUser.uid, privateLibrary).catch(e => console.error(e));
       }
     } catch (e) {
       console.error("Storage Error", e);
@@ -479,12 +496,49 @@ const App: React.FC = () => {
     });
   };
 
-  const handleToggleBookStatus = (bookTitle: string) => {
+  const handleToggleBookStatus = async (bookTitle: string) => {
+    const book = library.books[bookTitle];
+    if (!book) return;
+    
+    if (book.status !== 'published') {
+      if (!firebaseUser) {
+        alert("يجب تسجيل الدخول لنشر الكتب في المكتبة العامة.");
+        return;
+      }
+      try {
+        await publishBookToPublic(book, firebaseUser.uid);
+      } catch (err) {
+        alert("فشل في نشر الكتاب للعامة");
+        return;
+      }
+    } else {
+      if (firebaseUser && book.ownerId === firebaseUser.uid) {
+        try {
+          await unpublishBookFromPublic(bookTitle);
+        } catch (err) {
+          console.error(err);
+        }
+      } else if (book.ownerId && (!firebaseUser || book.ownerId !== firebaseUser.uid)) {
+        alert("لا تملك صلاحية إلغاء نشر هذا الكتاب.");
+        return;
+      }
+    }
+
     setLibrary(prev => {
-      const book = prev.books[bookTitle];
-      if (!book) return prev;
-      const newStatus = book.status === 'published' ? 'draft' : 'published';
-      return { ...prev, books: { ...prev.books, [bookTitle]: { ...book, status: newStatus as any } } };
+      const b = prev.books[bookTitle];
+      if (!b) return prev;
+      const newStatus = b.status === 'published' ? 'draft' : 'published';
+      return { 
+        ...prev, 
+        books: { 
+          ...prev.books, 
+          [bookTitle]: { 
+            ...b, 
+            status: newStatus as any, 
+            ownerId: firebaseUser ? firebaseUser.uid : b.ownerId 
+          } 
+        } 
+      };
     });
   };
 
@@ -713,6 +767,7 @@ const App: React.FC = () => {
         {view === 'library' && (
            <LibraryView 
              library={library} 
+             currentUserId={firebaseUser?.uid}
              setLibrary={setLibrary}
              onLoadPage={(book, page) => {
                setActiveSession({ bookTitle: book, currentPage: page.pageNumber });
@@ -735,6 +790,7 @@ const App: React.FC = () => {
         {view === 'full-viewer' && viewingBookTitle && (
           <FullBookViewer 
             book={library.books[viewingBookTitle]} 
+            currentUserId={firebaseUser?.uid}
             initialMode={viewerMode}
             onClose={() => setView('library')} 
             onUpdatePage={handleUpdateBookPage}
@@ -749,12 +805,13 @@ const App: React.FC = () => {
 
 const LibraryView: React.FC<{
   library: LibraryState;
+  currentUserId?: string;
   setLibrary: React.Dispatch<React.SetStateAction<LibraryState>>;
   onLoadPage: (bookTitle: string, page: PageData) => void;
   onInsertPage: (bookTitle: string, afterPageNumber: number) => void;
   onUpdatePageNumber: (bookTitle: string, pageId: string, newNumber: number) => void;
   onOpenFullViewer: (bookTitle: string, mode: 'read' | 'edit') => void;
-}> = ({ library, setLibrary, onLoadPage, onInsertPage, onUpdatePageNumber, onOpenFullViewer }) => {
+}> = ({ library, currentUserId, setLibrary, onLoadPage, onInsertPage, onUpdatePageNumber, onOpenFullViewer }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [downloadMenuOpen, setDownloadMenuOpen] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -1042,9 +1099,11 @@ const LibraryView: React.FC<{
                           </div>
                        )}
                    </div>
-                   <button onClick={() => handleDeleteBook(book.title)} className="p-2 hover:bg-red-900/20 rounded-lg text-slate-500 hover:text-red-500" title="حذف">
-                     <Trash2 size={18} />
-                   </button>
+                   {(!book.ownerId || book.ownerId === currentUserId) && (
+                     <button onClick={() => handleDeleteBook(book.title)} className="p-2 hover:bg-red-900/20 rounded-lg text-slate-500 hover:text-red-500" title="حذف">
+                       <Trash2 size={18} />
+                     </button>
+                   )}
                 </div>
               </div>
               <div className="flex items-center gap-2 mb-2">
@@ -1066,9 +1125,11 @@ const LibraryView: React.FC<{
                  <Button size="sm" variant="secondary" onClick={() => onOpenFullViewer(book.title, 'read')} className="flex-1 text-xs">
                    <Eye size={14} className="ml-1"/> تصفح
                  </Button>
-                 <Button size="sm" variant="primary" onClick={() => onInsertPage(book.title, book.pages.length > 0 ? Math.max(...book.pages.map(p=>p.pageNumber)) : 0)} className="flex-1 text-xs">
-                   <PlusCircle size={14} className="ml-1"/> إضافة
-                 </Button>
+                 {(!book.ownerId || book.ownerId === currentUserId) && (
+                   <Button size="sm" variant="primary" onClick={() => onInsertPage(book.title, book.pages.length > 0 ? Math.max(...book.pages.map(p=>p.pageNumber)) : 0)} className="flex-1 text-xs">
+                     <PlusCircle size={14} className="ml-1"/> إضافة
+                   </Button>
+                 )}
                </div>
             </div>
           </div>
@@ -1087,12 +1148,13 @@ const LibraryView: React.FC<{
 
 const FullBookViewer: React.FC<{
   book: Book, 
+  currentUserId?: string,
   initialMode: 'read' | 'edit',
   onClose: () => void, 
   onUpdatePage: (bookTitle: string, pageId: string, text: string) => void,
   onUpdateWholeBook: (bookTitle: string, parsedPages: {id: string, text: string}[]) => void,
   onToggleStatus: () => void
-}> = ({ book, initialMode, onClose, onUpdatePage, onUpdateWholeBook, onToggleStatus }) => {
+}> = ({ book, currentUserId, initialMode, onClose, onUpdatePage, onUpdateWholeBook, onToggleStatus }) => {
   const [toc, setToc] = useState<{id: string, title: string, level: number, page: number, index: number}[]>([]);
   const [showSidebar, setShowSidebar] = useState(true);
   const [mode, setMode] = useState<'read' | 'edit'>(initialMode);
@@ -1458,9 +1520,11 @@ const FullBookViewer: React.FC<{
                 <button onClick={() => setMode('read')} className={`px-4 py-2 rounded-md text-sm font-bold transition-all ${mode === 'read' ? 'bg-[#c5a059] text-slate-900 shadow' : 'text-slate-500 hover:bg-slate-800'}`}>
                     <span className="flex items-center gap-2"><BookOpenCheck size={16}/> قراءة</span>
                 </button>
-                <button onClick={() => setMode('edit')} className={`px-4 py-2 rounded-md text-sm font-bold transition-all ${mode === 'edit' ? 'bg-slate-700 text-white shadow' : 'text-slate-500 hover:bg-slate-800'}`}>
-                    <span className="flex items-center gap-2"><Pencil size={16}/> تحرير</span>
-                </button>
+                {(!book.ownerId || book.ownerId === currentUserId) && (
+                  <button onClick={() => setMode('edit')} className={`px-4 py-2 rounded-md text-sm font-bold transition-all ${mode === 'edit' ? 'bg-slate-700 text-white shadow' : 'text-slate-500 hover:bg-slate-800'}`}>
+                      <span className="flex items-center gap-2"><Pencil size={16}/> تحرير</span>
+                  </button>
+                )}
             </div>
         </div>
 

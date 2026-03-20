@@ -1,9 +1,9 @@
 /// <reference types="vite/client" />
 /// <reference types="vite/client" />
 import { initializeApp } from "firebase/app";
-import { getFirestore, doc, setDoc, getDoc } from "firebase/firestore";
+import { getFirestore, doc, setDoc, getDoc, collection, getDocs, deleteDoc } from "firebase/firestore";
 import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from "firebase/auth";
-import { LibraryState } from "../types";
+import { LibraryState, Book } from "../types";
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -86,5 +86,53 @@ export const loadLibraryFromFirestore = async (userId: string): Promise<LibraryS
   } catch (error) {
     console.error("Error loading library:", error);
     throw error;
+  }
+};
+
+export const publishBookToPublic = async (book: Book, userId: string) => {
+  if (!db) {
+    console.warn("DB not initialized");
+    return;
+  }
+  try {
+    const bookWithOwner = { ...book, ownerId: userId, status: 'published' as const };
+    const publicDocRef = doc(db, "public_books", book.title);
+    await setDoc(publicDocRef, bookWithOwner);
+  } catch (error) {
+    console.error("Error publishing book:", error);
+    throw error;
+  }
+};
+
+export const unpublishBookFromPublic = async (bookTitle: string) => {
+  if (!db) {
+    console.warn("DB not initialized");
+    return;
+  }
+  try {
+    const publicDocRef = doc(db, "public_books", bookTitle);
+    await deleteDoc(publicDocRef);
+  } catch (error) {
+    console.error("Error unpublishing book:", error);
+    throw error;
+  }
+};
+
+export const fetchPublicBooks = async (): Promise<Record<string, Book>> => {
+  if (!db) {
+    console.warn("DB not initialized");
+    return {};
+  }
+  try {
+    const publicBooksCol = collection(db, "public_books");
+    const bookSnapshot = await getDocs(publicBooksCol);
+    const books: Record<string, Book> = {};
+    bookSnapshot.forEach((docSnap) => {
+      books[docSnap.id] = docSnap.data() as Book;
+    });
+    return books;
+  } catch (error) {
+    console.error("Error fetching public books:", error);
+    return {};
   }
 };

@@ -17,6 +17,7 @@ export interface Book {
   isSeries?: boolean; // true = دورية/سلسلة, false = كتاب مفرد
   volumeNumber?: string;
   status?: 'draft' | 'published'; // New
+  ownerId?: string;
   pages: PageData[];
 }
 
