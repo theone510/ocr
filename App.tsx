@@ -628,7 +628,13 @@ const App: React.FC = () => {
                    </Button>
                  </div>
               ) : (
-                <Button variant="ghost" size="sm" onClick={loginWithGoogle} className="text-[#c5a059] hover:bg-[#c5a059]/10 bg-slate-800 border border-[#c5a059]/20">
+                <Button variant="ghost" size="sm" onClick={async () => {
+                  try {
+                    await loginWithGoogle();
+                  } catch (err: any) {
+                    alert('فشل تسجيل الدخول: ' + (err.message || 'خطأ غير معروف'));
+                  }
+                }} className="text-[#c5a059] hover:bg-[#c5a059]/10 bg-slate-800 border border-[#c5a059]/20">
                   <User size={16} className="ml-2 hidden sm:block"/> دخول سحابي
                 </Button>
               )}

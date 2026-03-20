@@ -2,7 +2,7 @@
 /// <reference types="vite/client" />
 import { initializeApp } from "firebase/app";
 import { getFirestore, doc, setDoc, getDoc } from "firebase/firestore";
-import { getAuth, GoogleAuthProvider, signInWithRedirect, signOut, onAuthStateChanged } from "firebase/auth";
+import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from "firebase/auth";
 import { LibraryState } from "../types";
 
 const firebaseConfig = {
@@ -36,7 +36,10 @@ try {
 // Auth Functions
 export const loginWithGoogle = async () => {
   try {
-    await signInWithRedirect(auth, googleProvider);
+    if (!auth || !googleProvider) {
+      throw new Error("Firebase auth is not initialized");
+    }
+    await signInWithPopup(auth, googleProvider);
     // User object will be handled by App.tsx through onAuthStateChanged
   } catch (error) {
     console.error("Error logging in:", error);
