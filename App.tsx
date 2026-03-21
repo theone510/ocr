@@ -429,7 +429,7 @@ const App: React.FC = () => {
     return { pageId, page: newPage, previewUrl };
   };
 
-  // Process a chunk of pages in parallel (up to CONCURRENT_PAGES at a time)
+  // Process a chunk of pages (sequential with CONCURRENT_PAGES=1, or parallel if increased)
   const processBatchChunk = async (doc: PDFDocumentProxy, startPdfPage: number, startManuscriptPage: number) => {
     if (batchControlRef.current.shouldStop) {
       setBatchStatus('paused');
@@ -438,7 +438,7 @@ const App: React.FC = () => {
     }
 
     if (startPdfPage > doc.numPages) {
-      // Check if there are failed pages to retry
+      // All pages processed
       const failed = batchControlRef.current.failedPages;
       if (failed.length > 0) {
         const failedList = failed.map(f => f.pdfPage).join(', ');
@@ -461,105 +461,39 @@ const App: React.FC = () => {
     setCurrentPdfPageIdx(startPdfPage);
     setActiveSession(prev => prev ? ({ ...prev, currentPage: startManuscriptPage }) : null);
 
-    // Build the chunk: up to CONCURRENT_PAGES pages
-    const chunkSize = Math.min(CONCURRENT_PAGES, doc.numPages - startPdfPage + 1);
-    const chunkTasks: {pdfPage: number, manuscriptPage: number}[] = [];
-    for (let i = 0; i < chunkSize; i++) {
-      chunkTasks.push({
-        pdfPage: startPdfPage + i,
-        manuscriptPage: startManuscriptPage + i
-      });
-    }
-
-    // Display the first page's preview to show activity
     try {
-      const previewData = await renderPageAsImage(doc, startPdfPage);
-      setCurrentImage({ base64: previewData.base64, mimeType: previewData.mimeType, previewUrl: previewData.previewUrl });
-    } catch (_) { /* preview is non-critical */ }
+      // 1. Render page image and show preview
+      const { base64, mimeType, previewUrl } = await renderPageAsImage(doc, startPdfPage);
+      setCurrentImage({ base64, mimeType, previewUrl });
 
-    // Process pages with staggered start (1.5s apart) to avoid API rate limits
-    const staggeredPromises = chunkTasks.map((task, index) => 
-      new Promise<{pageId: string, page: PageData, previewUrl: string}>(async (resolve, reject) => {
-        // Stagger: wait 1.5s per index before starting
-        if (index > 0) {
-          await new Promise(r => setTimeout(r, index * 1500));
-        }
-        try {
-          const result = await processSinglePage(doc, task.pdfPage, task.manuscriptPage);
-          resolve(result);
-        } catch (err) {
-          reject(err);
-        }
-      })
-    );
-    const results = await Promise.allSettled(staggeredPromises);
+      // 2. Analyze (analyzeManuscript already has 3 retries with backoff)
+      const text = await analyzeManuscript(base64, mimeType);
 
-    // Check if stopped during processing
-    if (batchControlRef.current.shouldStop) {
-      setBatchStatus('paused');
-      setLoadingState(LoadingState.IDLE);
-      return;
-    }
+      // 3. Save the page
+      const pageId = generateId();
+      const newPage: PageData = {
+        id: pageId,
+        pageNumber: startManuscriptPage,
+        text: text,
+        timestamp: Date.now(),
+        previewUrl: ''
+      };
 
-    // Collect successful results and failed tasks
-    const successfulPages: {pageId: string, page: PageData, previewUrl: string}[] = [];
-    const failedInChunk: {pdfPage: number, manuscriptPage: number, error: string}[] = [];
-
-    results.forEach((result, index) => {
-      if (result.status === 'fulfilled') {
-        successfulPages.push(result.value);
-      } else {
-        failedInChunk.push({
-          ...chunkTasks[index],
-          error: result.reason?.message || 'Unknown error'
-        });
-      }
-    });
-
-    // Retry failed pages once
-    if (failedInChunk.length > 0) {
-      console.log(`Retrying ${failedInChunk.length} failed pages...`);
-      const retryResults = await Promise.allSettled(
-        failedInChunk.map(task => processSinglePage(doc, task.pdfPage, task.manuscriptPage))
-      );
-
-      retryResults.forEach((result, index) => {
-        if (result.status === 'fulfilled') {
-          successfulPages.push(result.value);
-        } else {
-          // Still failed after retry - track it
-          batchControlRef.current.failedPages.push({
-            pdfPage: failedInChunk[index].pdfPage,
-            manuscriptPage: failedInChunk[index].manuscriptPage
-          });
-          console.error(`Page ${failedInChunk[index].pdfPage} failed after retry:`, result.reason);
-        }
-      });
-    }
-
-    // Save all successful pages (sorted by page number for correct order)
-    if (successfulPages.length > 0) {
-      successfulPages.sort((a, b) => a.page.pageNumber - b.page.pageNumber);
-      
       setLibrary(prev => {
         const currentBook = prev.books[batchControlRef.current.activeBook];
         if (!currentBook) return prev;
         
         let updatedPages = [...currentBook.pages];
-        
-        for (const { page } of successfulPages) {
-          const collisionIndex = updatedPages.findIndex(p => p.pageNumber === page.pageNumber);
-          if (collisionIndex !== -1) {
-            updatedPages = updatedPages.map(p => {
-              if (p.pageNumber >= page.pageNumber) {
-                return { ...p, pageNumber: p.pageNumber + 1 };
-              }
-              return p;
-            });
-          }
-          updatedPages.push(page);
+        const collisionIndex = updatedPages.findIndex(p => p.pageNumber === startManuscriptPage);
+        if (collisionIndex !== -1) {
+          updatedPages = updatedPages.map(p => {
+            if (p.pageNumber >= startManuscriptPage) {
+              return { ...p, pageNumber: p.pageNumber + 1 };
+            }
+            return p;
+          });
         }
-        
+        updatedPages.push(newPage);
         updatedPages.sort((a, b) => a.pageNumber - b.pageNumber);
 
         return {
@@ -574,21 +508,22 @@ const App: React.FC = () => {
         };
       });
 
-      // Update UI with the last completed page
-      const lastSuccess = successfulPages[successfulPages.length - 1];
-      setLastProcessedPageId(lastSuccess.pageId);
-      setCurrentPdfPageIdx(startPdfPage + chunkSize - 1);
+      setLastProcessedPageId(pageId);
+
+    } catch (err: any) {
+      console.error(`Page ${startPdfPage} failed:`, err);
+      // Record failure and continue to next page
+      batchControlRef.current.failedPages.push({
+        pdfPage: startPdfPage,
+        manuscriptPage: startManuscriptPage
+      });
+      setError(`خطأ في صفحة PDF رقم ${startPdfPage}: ${err.message}`);
     }
 
-    // Update the active session page number for the next chunk
-    const nextPdfPage = startPdfPage + chunkSize;
-    const nextManuscriptPage = startManuscriptPage + chunkSize;
-    setActiveSession(prev => prev ? ({ ...prev, currentPage: nextManuscriptPage }) : null);
-
-    // Small delay to allow UI to render, then process next chunk
+    // Move to next page after a short delay
     setTimeout(() => {
       if (!batchControlRef.current.shouldStop) {
-        processBatchChunk(doc, nextPdfPage, nextManuscriptPage);
+        processBatchChunk(doc, startPdfPage + 1, startManuscriptPage + 1);
       } else {
         setBatchStatus('paused');
         setLoadingState(LoadingState.IDLE);

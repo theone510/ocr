@@ -2,8 +2,8 @@
 import { GoogleGenAI } from "@google/genai";
 import { SYSTEM_INSTRUCTION, GEMINI_MODEL } from "../constants";
 
-const MAX_RETRIES = 3;
-const BASE_DELAY_MS = 2000; // 2 seconds base delay for exponential backoff
+const MAX_RETRIES = 2;
+const BASE_DELAY_MS = 1000; // 1 second base delay for exponential backoff
 
 // Helper: delay for a given number of milliseconds
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
