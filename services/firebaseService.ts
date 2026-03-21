@@ -76,7 +76,7 @@ export const syncLibraryToFirestore = async (userId: string, library: LibrarySta
   }
   try {
     const userDocRef = doc(db, "users", userId);
-    await setDoc(userDocRef, { library }, { merge: true });
+    await setDoc(userDocRef, { library });
   } catch (error) {
     console.error("Error syncing library:", error);
     throw error;
