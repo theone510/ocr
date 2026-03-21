@@ -46,7 +46,7 @@ import {
 } from 'lucide-react';
 
 const STORAGE_KEY = 'manuscript_library_v2'; 
-const CONCURRENT_PAGES = 2; // Number of pages to process in parallel (kept low to avoid API rate limits)
+const CONCURRENT_PAGES = 1; // Sequential processing - parallel causes API rate limiting
 
 const generateId = () => Date.now().toString(36) + Math.random().toString(36).slice(2);
 
