@@ -159,7 +159,7 @@ const App: React.FC = () => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(library));
       if (firebaseUser && isCloudLoadedRef.current) {
-        // Debounce Firestore sync to prevent "Write stream exhausted" errors
+        // Debounce Firestore sync to prevent "Write stream exhausted" errors during batch processing
         if (syncTimerRef.current) {
           clearTimeout(syncTimerRef.current);
         }
@@ -171,11 +171,30 @@ const App: React.FC = () => {
             ) 
           };
           syncLibraryToFirestore(firebaseUser.uid, privateLibrary).catch(e => console.error(e));
-        }, 5000); // 5 second debounce
+        }, 2000); // 2 second debounce
       }
     } catch (e) {
       console.error("Storage Error", e);
     }
+  }, [library, firebaseUser]);
+
+  // Flush pending Firestore sync when the page is about to close
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      if (syncTimerRef.current && firebaseUser && isCloudLoadedRef.current) {
+        clearTimeout(syncTimerRef.current);
+        syncTimerRef.current = null;
+        const privateLibrary = { 
+          ...library, 
+          books: Object.fromEntries(
+            Object.entries(library.books).filter(([_, b]) => !b.ownerId || b.ownerId === firebaseUser.uid)
+          ) 
+        };
+        syncLibraryToFirestore(firebaseUser.uid, privateLibrary).catch(e => console.error(e));
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
   }, [library, firebaseUser]);
 
   // Handle PWA Install Prompt
