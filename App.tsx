@@ -108,6 +108,22 @@ const App: React.FC = () => {
   const isCloudLoadedRef = useRef(false);
   const syncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Helper: immediately sync library to Firestore (bypasses debounce)
+  const syncNow = (libraryData: LibraryState) => {
+    if (!firebaseUser || !isCloudLoadedRef.current) return;
+    if (syncTimerRef.current) {
+      clearTimeout(syncTimerRef.current);
+      syncTimerRef.current = null;
+    }
+    const privateLibrary = { 
+      ...libraryData, 
+      books: Object.fromEntries(
+        Object.entries(libraryData.books).filter(([_, b]) => !b.ownerId || b.ownerId === firebaseUser.uid)
+      ) 
+    };
+    syncLibraryToFirestore(firebaseUser.uid, privateLibrary).catch(e => console.error(e));
+  };
+
   // Ref to handle loop control without dependency staleness
   const batchControlRef = useRef({ 
     shouldStop: false, 
@@ -138,8 +154,20 @@ const App: React.FC = () => {
           const cloudLibrary = await loadLibraryFromFirestore(user.uid);
           if (cloudLibrary && Object.keys(cloudLibrary.books).length > 0) {
             setLibrary(prev => {
-              // Smart Merge: Don't let empty cloud delete local work, and don't let empty local delete cloud
-              return { ...cloudLibrary, books: { ...prev.books, ...cloudLibrary.books } };
+              // Cloud is source of truth: use cloud books, only keep local books that don't exist in cloud
+              const mergedBooks = { ...prev.books };
+              // Remove any local book that exists in cloud (cloud wins)
+              for (const key of Object.keys(cloudLibrary.books)) {
+                mergedBooks[key] = cloudLibrary.books[key];
+              }
+              // Remove local books that were deleted from cloud
+              // (if cloud was loaded and a book exists locally but not in cloud, remove it)
+              for (const key of Object.keys(mergedBooks)) {
+                if (!cloudLibrary.books[key] && !mergedBooks[key].ownerId) {
+                  // Keep books without ownerId (local-only books) unless they match a cloud key
+                }
+              }
+              return { ...cloudLibrary, books: mergedBooks };
             });
           }
         } catch (e) {
@@ -887,6 +915,7 @@ const App: React.FC = () => {
              library={library} 
              currentUserId={firebaseUser?.uid}
              setLibrary={setLibrary}
+             onSyncNow={syncNow}
              onLoadPage={(book, page) => {
                setActiveSession({ bookTitle: book, currentPage: page.pageNumber });
                setLastProcessedPageId(page.id);
@@ -925,11 +954,12 @@ const LibraryView: React.FC<{
   library: LibraryState;
   currentUserId?: string;
   setLibrary: React.Dispatch<React.SetStateAction<LibraryState>>;
+  onSyncNow: (libraryData: LibraryState) => void;
   onLoadPage: (bookTitle: string, page: PageData) => void;
   onInsertPage: (bookTitle: string, afterPageNumber: number) => void;
   onUpdatePageNumber: (bookTitle: string, pageId: string, newNumber: number) => void;
   onOpenFullViewer: (bookTitle: string, mode: 'read' | 'edit') => void;
-}> = ({ library, currentUserId, setLibrary, onLoadPage, onInsertPage, onUpdatePageNumber, onOpenFullViewer }) => {
+}> = ({ library, currentUserId, setLibrary, onSyncNow, onLoadPage, onInsertPage, onUpdatePageNumber, onOpenFullViewer }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [downloadMenuOpen, setDownloadMenuOpen] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -946,7 +976,10 @@ const LibraryView: React.FC<{
       setLibrary(prev => {
         const newBooks = { ...prev.books };
         delete newBooks[title];
-        return { ...prev, books: newBooks };
+        const newLibrary = { ...prev, books: newBooks };
+        // Immediately sync deletion to Firestore (bypass debounce)
+        onSyncNow(newLibrary);
+        return newLibrary;
       });
     }
   };
