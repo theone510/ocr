@@ -35,7 +35,7 @@ export const BatchControls: React.FC<BatchControlsProps> = ({
            <div>
               <h3 className="font-bold text-slate-200 text-sm tracking-wide">المعالجة الآلية: <span className="text-[#c5a059]">{fileName}</span></h3>
               <p className="text-xs text-slate-500 font-mono">
-                {isPaused ? '>>> STATUS: PAUSED' : '>>> STATUS: PROCESSING...'} <span className="text-emerald-500/70">| ٣ صفحات بالتوازي</span>
+                {isPaused ? '>>> STATUS: PAUSED' : '>>> STATUS: PROCESSING...'} <span className="text-emerald-500/70">| ٢ صفحات بالتوازي</span>
               </p>
            </div>
         </div>

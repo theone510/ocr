@@ -46,7 +46,7 @@ import {
 } from 'lucide-react';
 
 const STORAGE_KEY = 'manuscript_library_v2'; 
-const CONCURRENT_PAGES = 3; // Number of pages to process in parallel
+const CONCURRENT_PAGES = 2; // Number of pages to process in parallel (kept low to avoid API rate limits)
 
 const generateId = () => Date.now().toString(36) + Math.random().toString(36).slice(2);
 
@@ -430,10 +430,22 @@ const App: React.FC = () => {
       setCurrentImage({ base64: previewData.base64, mimeType: previewData.mimeType, previewUrl: previewData.previewUrl });
     } catch (_) { /* preview is non-critical */ }
 
-    // Process all pages in this chunk in parallel
-    const results = await Promise.allSettled(
-      chunkTasks.map(task => processSinglePage(doc, task.pdfPage, task.manuscriptPage))
+    // Process pages with staggered start (1.5s apart) to avoid API rate limits
+    const staggeredPromises = chunkTasks.map((task, index) => 
+      new Promise<{pageId: string, page: PageData, previewUrl: string}>(async (resolve, reject) => {
+        // Stagger: wait 1.5s per index before starting
+        if (index > 0) {
+          await new Promise(r => setTimeout(r, index * 1500));
+        }
+        try {
+          const result = await processSinglePage(doc, task.pdfPage, task.manuscriptPage);
+          resolve(result);
+        } catch (err) {
+          reject(err);
+        }
+      })
     );
+    const results = await Promise.allSettled(staggeredPromises);
 
     // Check if stopped during processing
     if (batchControlRef.current.shouldStop) {
