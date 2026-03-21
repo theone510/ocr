@@ -2,59 +2,103 @@
 import { GoogleGenAI } from "@google/genai";
 import { SYSTEM_INSTRUCTION, GEMINI_MODEL } from "../constants";
 
-// The analyzeManuscript function now initializes a fresh client for every request
-// to ensure it captures any potential updates to environment variables or session tokens.
+const MAX_RETRIES = 3;
+const BASE_DELAY_MS = 2000; // 2 seconds base delay for exponential backoff
+
+// Helper: delay for a given number of milliseconds
+const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+// The analyzeManuscript function with retry + exponential backoff
 export const analyzeManuscript = async (base64Image: string, mimeType: string): Promise<string> => {
-  try {
-    // Initialize with apiKey from environment variables as per requirements
-    const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_GEMINI_API_KEY });
-    
-    // Model configuration for high-quality manuscript transcription
-    const response = await ai.models.generateContent({
-      model: GEMINI_MODEL,
-      contents: {
-        parts: [
-          {
-            inlineData: {
-              mimeType: mimeType,
-              data: base64Image,
-            },
-          },
-          {
-            text: "Start extraction following the defined silent protocol.",
-          }
-        ],
-      },
-      config: {
-        systemInstruction: SYSTEM_INSTRUCTION,
-        temperature: 0.1, // Maintains factual accuracy for OCR tasks
-      },
-    });
+  let lastError: any = null;
 
-    // Access text property directly or via function depending on genai SDK version
-    // Use 'any' cast to prevent TypeScript from complaining if it thinks text is strictly a string getter
-    const textValue = typeof (response as any).text === 'function' ? (response as any).text() : response.text;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      // Wait before retry (exponential backoff): 0s, 2s, 4s, 8s
+      if (attempt > 0) {
+        const backoffMs = BASE_DELAY_MS * Math.pow(2, attempt - 1);
+        console.log(`Retry attempt ${attempt}/${MAX_RETRIES} after ${backoffMs}ms...`);
+        await delay(backoffMs);
+      }
 
-    if (!textValue) {
-      console.error("Gemini Raw Response:", JSON.stringify(response, null, 2));
-      const finishReason = response.candidates?.[0]?.finishReason;
+      const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_GEMINI_API_KEY });
       
-      // If the model finished normally but returned no text, it likely means the page is blank or has no recognizable text.
-      // We return an empty string so that batch processing continues instead of failing.
-      if (finishReason === 'STOP') {
-        return "";
+      const response = await ai.models.generateContent({
+        model: GEMINI_MODEL,
+        contents: {
+          parts: [
+            {
+              inlineData: {
+                mimeType: mimeType,
+                data: base64Image,
+              },
+            },
+            {
+              text: "Start extraction following the defined silent protocol.",
+            }
+          ],
+        },
+        config: {
+          systemInstruction: SYSTEM_INSTRUCTION,
+          temperature: 0.1,
+        },
+      });
+
+      const textValue = typeof (response as any).text === 'function' ? (response as any).text() : response.text;
+
+      if (!textValue) {
+        const finishReason = response.candidates?.[0]?.finishReason;
+        
+        // Blank page: model finished normally but returned no text
+        if (finishReason === 'STOP') {
+          return "";
+        }
+
+        let errMsg = "No text was extracted from the image.";
+        if (finishReason) {
+          errMsg += ` (Reason: ${finishReason})`;
+        }
+        throw new Error(errMsg);
       }
 
-      let errMsg = "No text was extracted from the image.";
-      if (finishReason) {
-        errMsg += ` (Reason: ${finishReason})`;
+      // Safety net: detect blank page meta-messages
+      const lowerText = textValue.toLowerCase();
+      if (
+        lowerText.includes('completely blank') ||
+        lowerText.includes('no text') ||
+        lowerText.includes('cannot extract') ||
+        lowerText.includes('لا يوجد نص') ||
+        lowerText.includes('صفحة فارغة')
+      ) {
+        if (textValue.length < 200) {
+          return "";
+        }
       }
-      throw new Error(errMsg);
+
+      return textValue;
+
+    } catch (error: any) {
+      lastError = error;
+      
+      // Check if this is a retryable error (network/rate-limit)
+      const isRetryable = 
+        error.message?.includes('Failed to fetch') ||
+        error.message?.includes('ERR_FAILED') ||
+        error.message?.includes('429') ||
+        error.message?.includes('503') ||
+        error.message?.includes('rate') ||
+        error.message?.includes('RESOURCE_EXHAUSTED') ||
+        error.message?.includes('network');
+      
+      if (!isRetryable || attempt === MAX_RETRIES) {
+        console.error("Gemini Analysis Error (non-retryable or max retries reached):", error);
+        throw error;
+      }
+      
+      console.warn(`Gemini request failed (attempt ${attempt + 1}), will retry:`, error.message);
     }
-
-    return textValue;
-  } catch (error) {
-    console.error("Gemini Analysis Error:", error);
-    throw error;
   }
+
+  // Should not reach here, but just in case
+  throw lastError;
 };

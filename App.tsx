@@ -46,6 +46,7 @@ import {
 } from 'lucide-react';
 
 const STORAGE_KEY = 'manuscript_library_v2'; 
+const CONCURRENT_PAGES = 3; // Number of pages to process in parallel
 
 const generateId = () => Date.now().toString(36) + Math.random().toString(36).slice(2);
 
@@ -105,11 +106,13 @@ const App: React.FC = () => {
   const [installPrompt, setInstallPrompt] = useState<any>(null);
   
   const isCloudLoadedRef = useRef(false);
+  const syncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Ref to handle loop control without dependency staleness
   const batchControlRef = useRef({ 
     shouldStop: false, 
     activeBook: '', 
+    failedPages: [] as {pdfPage: number, manuscriptPage: number}[],
   });
 
   useEffect(() => {
@@ -156,13 +159,19 @@ const App: React.FC = () => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(library));
       if (firebaseUser && isCloudLoadedRef.current) {
-        const privateLibrary = { 
-          ...library, 
-          books: Object.fromEntries(
-            Object.entries(library.books).filter(([_, b]) => !b.ownerId || b.ownerId === firebaseUser.uid)
-          ) 
-        };
-        syncLibraryToFirestore(firebaseUser.uid, privateLibrary).catch(e => console.error(e));
+        // Debounce Firestore sync to prevent "Write stream exhausted" errors
+        if (syncTimerRef.current) {
+          clearTimeout(syncTimerRef.current);
+        }
+        syncTimerRef.current = setTimeout(() => {
+          const privateLibrary = { 
+            ...library, 
+            books: Object.fromEntries(
+              Object.entries(library.books).filter(([_, b]) => !b.ownerId || b.ownerId === firebaseUser.uid)
+            ) 
+          };
+          syncLibraryToFirestore(firebaseUser.uid, privateLibrary).catch(e => console.error(e));
+        }, 5000); // 5 second debounce
       }
     } catch (e) {
       console.error("Storage Error", e);
@@ -313,7 +322,7 @@ const App: React.FC = () => {
   };
 
 
-  // --- PDF Batch Logic ---
+  // --- PDF Batch Logic (Parallel Processing) ---
 
   const handlePdfSelected = async (file: File) => {
     if (!activeSession) return;
@@ -325,8 +334,6 @@ const App: React.FC = () => {
       setPdfFileName(file.name);
       setLoadingState(LoadingState.IDLE);
       
-      // Prompt user for PDF start page (This handles the "resume" requirement)
-      // Defaults to the currently expected page if new, or 1.
       const suggestedPdfPage = 1; 
       
       const userStartPdfPage = prompt(
@@ -336,22 +343,19 @@ const App: React.FC = () => {
 
       if (userStartPdfPage) {
         const startIdx = parseInt(userStartPdfPage) || 1;
-        // Clamp startIdx
         const safeStartIdx = Math.max(1, Math.min(startIdx, doc.numPages));
         
         setCurrentPdfPageIdx(safeStartIdx);
         
-        // Setup Batch Control Ref
         batchControlRef.current = {
           shouldStop: false,
           activeBook: activeSession.bookTitle,
+          failedPages: [],
         };
         
-        // Start immediately
         setBatchStatus('running');
-        processNextBatchPage(doc, safeStartIdx, activeSession.currentPage);
+        processBatchChunk(doc, safeStartIdx, activeSession.currentPage);
       } else {
-        // Cancelled
         setPdfDoc(null);
         setLoadingState(LoadingState.IDLE);
       }
@@ -363,67 +367,140 @@ const App: React.FC = () => {
     }
   };
 
-  const processNextBatchPage = async (doc: PDFDocumentProxy, pdfPageNum: number, manuscriptPageNum: number) => {
-    // Check Stop Condition
+  // Process a single page: render + analyze + return result
+  const processSinglePage = async (doc: PDFDocumentProxy, pdfPageNum: number, manuscriptPageNum: number): Promise<{pageId: string, page: PageData, previewUrl: string}> => {
+    const { base64, mimeType, previewUrl } = await renderPageAsImage(doc, pdfPageNum);
+    const text = await analyzeManuscript(base64, mimeType);
+    const pageId = generateId();
+    const newPage: PageData = {
+      id: pageId,
+      pageNumber: manuscriptPageNum,
+      text: text,
+      timestamp: Date.now(),
+      previewUrl: ''
+    };
+    return { pageId, page: newPage, previewUrl };
+  };
+
+  // Process a chunk of pages in parallel (up to CONCURRENT_PAGES at a time)
+  const processBatchChunk = async (doc: PDFDocumentProxy, startPdfPage: number, startManuscriptPage: number) => {
     if (batchControlRef.current.shouldStop) {
-        setBatchStatus('paused');
-        return;
+      setBatchStatus('paused');
+      setLoadingState(LoadingState.IDLE);
+      return;
     }
 
-    if (pdfPageNum > doc.numPages) {
+    if (startPdfPage > doc.numPages) {
+      // Check if there are failed pages to retry
+      const failed = batchControlRef.current.failedPages;
+      if (failed.length > 0) {
+        const failedList = failed.map(f => f.pdfPage).join(', ');
+        setError(`تم الانتهاء مع ${failed.length} صفحة فاشلة (PDF pages: ${failedList}). يمكنك الاستئناف لإعادة المحاولة.`);
+        batchControlRef.current.shouldStop = true;
+        setBatchStatus('paused');
+        setLoadingState(LoadingState.ERROR);
+      } else {
         setBatchStatus('completed');
         alert(`تم الانتهاء من معالجة الكتاب بالكامل (${doc.numPages} صفحة).`);
         setPdfDoc(null);
         setBatchStatus('idle');
         setLoadingState(LoadingState.IDLE);
         setCurrentImage(null);
-        return;
+      }
+      return;
     }
 
     setLoadingState(LoadingState.ANALYZING);
-    setCurrentPdfPageIdx(pdfPageNum);
-    setActiveSession(prev => prev ? ({ ...prev, currentPage: manuscriptPageNum }) : null);
+    setCurrentPdfPageIdx(startPdfPage);
+    setActiveSession(prev => prev ? ({ ...prev, currentPage: startManuscriptPage }) : null);
 
-    try {
-      // 1. Render Page to Image
-      const { base64, mimeType, previewUrl } = await renderPageAsImage(doc, pdfPageNum);
-      
-      // 2. Update UI to show the image being processed
-      setCurrentImage({
-          base64,
-          mimeType,
-          previewUrl
+    // Build the chunk: up to CONCURRENT_PAGES pages
+    const chunkSize = Math.min(CONCURRENT_PAGES, doc.numPages - startPdfPage + 1);
+    const chunkTasks: {pdfPage: number, manuscriptPage: number}[] = [];
+    for (let i = 0; i < chunkSize; i++) {
+      chunkTasks.push({
+        pdfPage: startPdfPage + i,
+        manuscriptPage: startManuscriptPage + i
       });
+    }
 
-      // 3. Analyze (Extract Text)
-      const text = await analyzeManuscript(base64, mimeType);
+    // Display the first page's preview to show activity
+    try {
+      const previewData = await renderPageAsImage(doc, startPdfPage);
+      setCurrentImage({ base64: previewData.base64, mimeType: previewData.mimeType, previewUrl: previewData.previewUrl });
+    } catch (_) { /* preview is non-critical */ }
+
+    // Process all pages in this chunk in parallel
+    const results = await Promise.allSettled(
+      chunkTasks.map(task => processSinglePage(doc, task.pdfPage, task.manuscriptPage))
+    );
+
+    // Check if stopped during processing
+    if (batchControlRef.current.shouldStop) {
+      setBatchStatus('paused');
+      setLoadingState(LoadingState.IDLE);
+      return;
+    }
+
+    // Collect successful results and failed tasks
+    const successfulPages: {pageId: string, page: PageData, previewUrl: string}[] = [];
+    const failedInChunk: {pdfPage: number, manuscriptPage: number, error: string}[] = [];
+
+    results.forEach((result, index) => {
+      if (result.status === 'fulfilled') {
+        successfulPages.push(result.value);
+      } else {
+        failedInChunk.push({
+          ...chunkTasks[index],
+          error: result.reason?.message || 'Unknown error'
+        });
+      }
+    });
+
+    // Retry failed pages once
+    if (failedInChunk.length > 0) {
+      console.log(`Retrying ${failedInChunk.length} failed pages...`);
+      const retryResults = await Promise.allSettled(
+        failedInChunk.map(task => processSinglePage(doc, task.pdfPage, task.manuscriptPage))
+      );
+
+      retryResults.forEach((result, index) => {
+        if (result.status === 'fulfilled') {
+          successfulPages.push(result.value);
+        } else {
+          // Still failed after retry - track it
+          batchControlRef.current.failedPages.push({
+            pdfPage: failedInChunk[index].pdfPage,
+            manuscriptPage: failedInChunk[index].manuscriptPage
+          });
+          console.error(`Page ${failedInChunk[index].pdfPage} failed after retry:`, result.reason);
+        }
+      });
+    }
+
+    // Save all successful pages (sorted by page number for correct order)
+    if (successfulPages.length > 0) {
+      successfulPages.sort((a, b) => a.page.pageNumber - b.page.pageNumber);
       
-      // 4. Save
-      const pageId = generateId();
-      const newPage: PageData = {
-        id: pageId,
-        pageNumber: manuscriptPageNum,
-        text: text,
-        timestamp: Date.now(),
-        previewUrl: '' // We don't save preview URL for PDFs to save space
-      };
-
       setLibrary(prev => {
         const currentBook = prev.books[batchControlRef.current.activeBook];
-        if (!currentBook) return prev; 
+        if (!currentBook) return prev;
         
         let updatedPages = [...currentBook.pages];
         
-        const collisionIndex = updatedPages.findIndex(p => p.pageNumber === manuscriptPageNum);
-        if (collisionIndex !== -1) {
-             updatedPages = updatedPages.map(p => {
-            if (p.pageNumber >= manuscriptPageNum) {
-              return { ...p, pageNumber: p.pageNumber + 1 };
-            }
-            return p;
-          });
+        for (const { page } of successfulPages) {
+          const collisionIndex = updatedPages.findIndex(p => p.pageNumber === page.pageNumber);
+          if (collisionIndex !== -1) {
+            updatedPages = updatedPages.map(p => {
+              if (p.pageNumber >= page.pageNumber) {
+                return { ...p, pageNumber: p.pageNumber + 1 };
+              }
+              return p;
+            });
+          }
+          updatedPages.push(page);
         }
-        updatedPages.push(newPage);
+        
         updatedPages.sort((a, b) => a.pageNumber - b.pageNumber);
 
         return {
@@ -438,28 +515,26 @@ const App: React.FC = () => {
         };
       });
 
-      setLastProcessedPageId(pageId);
-      
-      // 5. Loop (Sequential Processing)
-      // Small delay to allow UI to render the completion of this page before starting next
-      setTimeout(() => {
-          // Re-check stop condition before next iteration inside timeout
-          if (!batchControlRef.current.shouldStop) {
-            processNextBatchPage(doc, pdfPageNum + 1, manuscriptPageNum + 1);
-          } else {
-             setBatchStatus('paused');
-             setLoadingState(LoadingState.IDLE);
-          }
-      }, 500);
-
-    } catch (err: any) {
-      console.error("Batch Error:", err);
-      // Don't use alert inside the loop if possible, or show it once
-      setError(`خطأ في صفحة PDF رقم ${pdfPageNum}: ${err.message}`);
-      setBatchStatus('paused');
-      batchControlRef.current.shouldStop = true;
-      setLoadingState(LoadingState.ERROR);
+      // Update UI with the last completed page
+      const lastSuccess = successfulPages[successfulPages.length - 1];
+      setLastProcessedPageId(lastSuccess.pageId);
+      setCurrentPdfPageIdx(startPdfPage + chunkSize - 1);
     }
+
+    // Update the active session page number for the next chunk
+    const nextPdfPage = startPdfPage + chunkSize;
+    const nextManuscriptPage = startManuscriptPage + chunkSize;
+    setActiveSession(prev => prev ? ({ ...prev, currentPage: nextManuscriptPage }) : null);
+
+    // Small delay to allow UI to render, then process next chunk
+    setTimeout(() => {
+      if (!batchControlRef.current.shouldStop) {
+        processBatchChunk(doc, nextPdfPage, nextManuscriptPage);
+      } else {
+        setBatchStatus('paused');
+        setLoadingState(LoadingState.IDLE);
+      }
+    }, 300);
   };
 
   const pauseBatch = () => {
@@ -470,11 +545,23 @@ const App: React.FC = () => {
 
   const resumeBatch = () => {
     if (!pdfDoc || !activeSession) return;
+    
+    // If resuming after failed pages, retry them first
+    const failed = batchControlRef.current.failedPages;
+    
     batchControlRef.current.shouldStop = false;
+    batchControlRef.current.failedPages = [];
     setBatchStatus('running');
     setError(null);
-    // Resume from current indices
-    processNextBatchPage(pdfDoc, currentPdfPageIdx, activeSession.currentPage);
+    
+    if (failed.length > 0) {
+      // Retry failed pages by starting from the first failed page
+      const firstFailed = failed.sort((a, b) => a.pdfPage - b.pdfPage)[0];
+      processBatchChunk(pdfDoc, firstFailed.pdfPage, firstFailed.manuscriptPage);
+    } else {
+      // Resume from current position
+      processBatchChunk(pdfDoc, currentPdfPageIdx + 1, activeSession.currentPage);
+    }
   };
 
   const handleUpdatePageText = (newText: string) => {

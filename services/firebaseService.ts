@@ -2,7 +2,7 @@
 /// <reference types="vite/client" />
 import { initializeApp } from "firebase/app";
 import { getFirestore, doc, setDoc, getDoc, collection, getDocs, deleteDoc } from "firebase/firestore";
-import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from "firebase/auth";
+import { getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, signOut, onAuthStateChanged } from "firebase/auth";
 import { LibraryState, Book } from "../types";
 
 const firebaseConfig = {
@@ -39,8 +39,20 @@ export const loginWithGoogle = async () => {
     if (!auth || !googleProvider) {
       throw new Error("Firebase auth is not initialized");
     }
-    await signInWithPopup(auth, googleProvider);
-    // User object will be handled by App.tsx through onAuthStateChanged
+    // Try popup first, fallback to redirect if blocked by COOP
+    try {
+      await signInWithPopup(auth, googleProvider);
+    } catch (popupError: any) {
+      // If popup is blocked by browser/COOP, use redirect instead
+      if (popupError.code === 'auth/popup-blocked' || 
+          popupError.code === 'auth/popup-closed-by-user' ||
+          popupError.message?.includes('Cross-Origin')) {
+        console.log("Popup blocked, falling back to redirect...");
+        await signInWithRedirect(auth, googleProvider);
+      } else {
+        throw popupError;
+      }
+    }
   } catch (error) {
     console.error("Error logging in:", error);
     throw error;
