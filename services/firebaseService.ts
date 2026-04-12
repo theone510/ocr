@@ -1,8 +1,7 @@
 /// <reference types="vite/client" />
-/// <reference types="vite/client" />
 import { initializeApp } from "firebase/app";
-import { getFirestore, doc, setDoc, getDoc, collection, getDocs, deleteDoc } from "firebase/firestore";
-import { getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, signOut, onAuthStateChanged } from "firebase/auth";
+import { getFirestore, doc, setDoc, getDoc, collection, getDocs, deleteDoc, writeBatch } from "firebase/firestore";
+import { getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, signOut } from "firebase/auth";
 import { LibraryState, Book } from "../types";
 
 const firebaseConfig = {
@@ -15,7 +14,7 @@ const firebaseConfig = {
 };
 
 // Initialize Firebase safely
-let app;
+let app: any;
 export let db: ReturnType<typeof getFirestore> | null = null;
 export let auth: ReturnType<typeof getAuth> | null = null;
 export let googleProvider: GoogleAuthProvider | null = null;
@@ -39,14 +38,14 @@ export const loginWithGoogle = async () => {
     if (!auth || !googleProvider) {
       throw new Error("Firebase auth is not initialized");
     }
-    // Try popup first, fallback to redirect if blocked by COOP
     try {
       await signInWithPopup(auth, googleProvider);
     } catch (popupError: any) {
-      // If popup is blocked by browser/COOP, use redirect instead
-      if (popupError.code === 'auth/popup-blocked' || 
-          popupError.code === 'auth/popup-closed-by-user' ||
-          popupError.message?.includes('Cross-Origin')) {
+      if (
+        popupError.code === 'auth/popup-blocked' ||
+        popupError.code === 'auth/popup-closed-by-user' ||
+        popupError.message?.includes('Cross-Origin')
+      ) {
         console.log("Popup blocked, falling back to redirect...");
         await signInWithRedirect(auth, googleProvider);
       } else {
@@ -61,45 +60,123 @@ export const loginWithGoogle = async () => {
 
 export const logoutUser = async () => {
   try {
-    await signOut(auth);
+    await signOut(auth!);
   } catch (error) {
     console.error("Error logging out:", error);
     throw error;
   }
 };
 
-// Database Functions
+// ─────────────────────────────────────────────────────────────────────────────
+// NEW SUBCOLLECTION APPROACH
+// Structure:
+//   users/{userId}/books/{bookTitle}   ← one doc per book (no 1 MB limit issue)
+//   users/{userId}/meta/info           ← publishers & authors lists
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Sync the full library using subcollections.
+ * Each book is stored as its own Firestore document so we never hit the 1 MB limit.
+ * Deleted books are removed from Firestore via a batch delete.
+ */
 export const syncLibraryToFirestore = async (userId: string, library: LibraryState) => {
   if (!db) {
     console.warn("DB not initialized, falling back to localStorage");
     return;
   }
   try {
-    const userDocRef = doc(db, "users", userId);
-    await setDoc(userDocRef, { library });
+    // 1. Save metadata (publishers & authors)
+    const metaRef = doc(db, "users", userId, "meta", "info");
+    await setDoc(metaRef, {
+      publishers: library.publishers ?? [],
+      authors: library.authors ?? [],
+    });
+
+    // 2. Get existing book IDs from Firestore
+    const booksCol = collection(db, "users", userId, "books");
+    const existingSnap = await getDocs(booksCol);
+    const existingIds = new Set(existingSnap.docs.map(d => d.id));
+
+    // 3. Write/update each book document (Firestore limit: 500 ops per batch)
+    const bookEntries = Object.entries(library.books);
+    const BATCH_SIZE = 400;
+
+    for (let i = 0; i < bookEntries.length; i += BATCH_SIZE) {
+      const batch = writeBatch(db);
+      const chunk = bookEntries.slice(i, i + BATCH_SIZE);
+      for (const [title, book] of chunk) {
+        const bookRef = doc(db, "users", userId, "books", title);
+        batch.set(bookRef, book);
+      }
+      await batch.commit();
+    }
+
+    // 4. Delete books that were removed locally but still exist in Firestore
+    const currentIds = new Set(Object.keys(library.books));
+    const idsToDelete = [...existingIds].filter(id => !currentIds.has(id));
+
+    for (let i = 0; i < idsToDelete.length; i += BATCH_SIZE) {
+      const batch = writeBatch(db);
+      idsToDelete.slice(i, i + BATCH_SIZE).forEach(id => {
+        batch.delete(doc(db!, "users", userId, "books", id));
+      });
+      await batch.commit();
+    }
   } catch (error) {
     console.error("Error syncing library:", error);
     throw error;
   }
 };
 
+/**
+ * Load the full library from Firestore subcollections.
+ */
 export const loadLibraryFromFirestore = async (userId: string): Promise<LibraryState | null> => {
   if (!db) {
     console.warn("DB not initialized");
     return null;
   }
   try {
-    const userDocRef = doc(db, "users", userId);
-    const docSnap = await getDoc(userDocRef);
-    if (docSnap.exists()) {
-      return docSnap.data().library as LibraryState;
+    // Load metadata
+    const metaRef = doc(db, "users", userId, "meta", "info");
+    const metaSnap = await getDoc(metaRef);
+
+    // Load all books
+    const booksCol = collection(db, "users", userId, "books");
+    const booksSnap = await getDocs(booksCol);
+
+    if (!metaSnap.exists() && booksSnap.empty) {
+      // Try legacy format (old single-document approach) for backward compatibility
+      const legacyRef = doc(db, "users", userId);
+      const legacySnap = await getDoc(legacyRef);
+      if (legacySnap.exists() && legacySnap.data().library) {
+        console.log("Loaded from legacy single-document format. Will migrate on next sync.");
+        return legacySnap.data().library as LibraryState;
+      }
+      return null;
     }
-    return null;
+
+    const books: Record<string, Book> = {};
+    booksSnap.forEach(docSnap => {
+      books[docSnap.id] = docSnap.data() as Book;
+    });
+
+    const meta = metaSnap.exists() ? metaSnap.data() : {};
+
+    return {
+      books,
+      publishers: meta.publishers ?? ['العتبة الحسينية المقدسة', 'دار المعارف', 'مؤسسة الأعلمي للمطبوعات'],
+      authors: meta.authors ?? ['آقا بزرگ الطهراني', 'الشيخ المفيد', 'الشريف المرتضى'],
+    };
   } catch (error) {
     console.error("Error loading library:", error);
     throw error;
   }
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Public Books
+// ─────────────────────────────────────────────────────────────────────────────
 
 export const publishBookToPublic = async (book: Book, userId: string) => {
   if (!db) {

@@ -1,0 +1,28 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Private library: each user owns their subtree ──────────────────────
+    match /users/{userId}/{document=**} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // ── Public books: anyone can read, only the book owner can write ────────
+    match /public_books/{bookId} {
+      // Anyone (even unauthenticated) can read public books
+      allow read: if true;
+
+      // Only authenticated users can create / update their own books
+      allow create: if request.auth != null
+                    && request.resource.data.ownerId == request.auth.uid;
+
+      allow update: if request.auth != null
+                    && resource.data.ownerId == request.auth.uid;
+
+      // Only the owner can delete their book
+      allow delete: if request.auth != null
+                    && resource.data.ownerId == request.auth.uid;
+    }
+  }
+}
