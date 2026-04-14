@@ -107,21 +107,51 @@ const App: React.FC = () => {
   
   const isCloudLoadedRef = useRef(false);
   const syncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 'idle' | 'saving' | 'saved' | 'error'
+  const [cloudSyncStatus, setCloudSyncStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
 
-  // Helper: immediately sync library to Firestore (bypasses debounce)
-  const syncNow = (libraryData: LibraryState) => {
+  // Manual cloud save — called only when user presses the save button
+  const handleManualCloudSave = async () => {
+    if (!firebaseUser || !isCloudLoadedRef.current) {
+      alert('يجب تسجيل الدخول أولاً للحفظ السحابي');
+      return;
+    }
+    setCloudSyncStatus('saving');
+    try {
+      const privateLibrary = {
+        ...library,
+        books: Object.fromEntries(
+          Object.entries(library.books).filter(([_, b]) => !b.ownerId || b.ownerId === firebaseUser.uid)
+        )
+      };
+      await syncLibraryToFirestore(firebaseUser.uid, privateLibrary);
+      setCloudSyncStatus('saved');
+      setTimeout(() => setCloudSyncStatus('idle'), 3000);
+    } catch (e) {
+      console.error(e);
+      setCloudSyncStatus('error');
+      setTimeout(() => setCloudSyncStatus('idle'), 4000);
+    }
+  };
+
+  // syncNow: immediate sync for deletions — also triggers only explicitly
+  const syncNow = async (libraryData: LibraryState) => {
     if (!firebaseUser || !isCloudLoadedRef.current) return;
     if (syncTimerRef.current) {
       clearTimeout(syncTimerRef.current);
       syncTimerRef.current = null;
     }
-    const privateLibrary = { 
-      ...libraryData, 
+    const privateLibrary = {
+      ...libraryData,
       books: Object.fromEntries(
         Object.entries(libraryData.books).filter(([_, b]) => !b.ownerId || b.ownerId === firebaseUser.uid)
-      ) 
+      )
     };
-    syncLibraryToFirestore(firebaseUser.uid, privateLibrary).catch(e => console.error(e));
+    try {
+      await syncLibraryToFirestore(firebaseUser.uid, privateLibrary);
+    } catch (e) {
+      console.error('syncNow error:', e);
+    }
   };
 
   // Ref to handle loop control without dependency staleness
@@ -183,47 +213,14 @@ const App: React.FC = () => {
     return () => unsubscribe();
   }, []);
 
+  // Save to localStorage only (NO automatic Firestore sync during editing/processing)
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(library));
-      if (firebaseUser && isCloudLoadedRef.current) {
-        // Debounce Firestore sync to prevent "Write stream exhausted" errors during batch processing
-        if (syncTimerRef.current) {
-          clearTimeout(syncTimerRef.current);
-        }
-        syncTimerRef.current = setTimeout(() => {
-          const privateLibrary = { 
-            ...library, 
-            books: Object.fromEntries(
-              Object.entries(library.books).filter(([_, b]) => !b.ownerId || b.ownerId === firebaseUser.uid)
-            ) 
-          };
-          syncLibraryToFirestore(firebaseUser.uid, privateLibrary).catch(e => console.error(e));
-        }, 2000); // 2 second debounce
-      }
     } catch (e) {
-      console.error("Storage Error", e);
+      console.error('Storage Error', e);
     }
-  }, [library, firebaseUser]);
-
-  // Flush pending Firestore sync when the page is about to close
-  useEffect(() => {
-    const handleBeforeUnload = () => {
-      if (syncTimerRef.current && firebaseUser && isCloudLoadedRef.current) {
-        clearTimeout(syncTimerRef.current);
-        syncTimerRef.current = null;
-        const privateLibrary = { 
-          ...library, 
-          books: Object.fromEntries(
-            Object.entries(library.books).filter(([_, b]) => !b.ownerId || b.ownerId === firebaseUser.uid)
-          ) 
-        };
-        syncLibraryToFirestore(firebaseUser.uid, privateLibrary).catch(e => console.error(e));
-      }
-    };
-    window.addEventListener('beforeunload', handleBeforeUnload);
-    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-  }, [library, firebaseUser]);
+  }, [library]);
 
   // Handle PWA Install Prompt
   useEffect(() => {
@@ -637,6 +634,19 @@ const App: React.FC = () => {
     });
   };
 
+  const handleDeletePage = (bookTitle: string, pageId: string) => {
+    if (!confirm('هل أنت متأكد من حذف هذه الصفحة؟')) return;
+    setLibrary(prev => {
+      const book = prev.books[bookTitle];
+      if (!book) return prev;
+      const updatedPages = book.pages.filter(p => p.id !== pageId);
+      return {
+        ...prev,
+        books: { ...prev.books, [bookTitle]: { ...book, pages: updatedPages } }
+      };
+    });
+  };
+
   const handlePageNumberEdit = (bookTitle: string, pageId: string, newNumber: number) => {
     setLibrary(prev => {
       const book = prev.books[bookTitle];
@@ -752,9 +762,34 @@ const App: React.FC = () => {
                   <BookCopy size={16} className="ml-2" /> المكتبة الرقمية
                 </Button>
               ) : null}
+              {/* Manual Cloud Save Button */}
+              {firebaseUser && (
+                <button
+                  onClick={handleManualCloudSave}
+                  disabled={cloudSyncStatus === 'saving'}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold border transition-all duration-300 ${
+                    cloudSyncStatus === 'saving'
+                      ? 'bg-blue-500/20 border-blue-500/50 text-blue-400 cursor-wait'
+                      : cloudSyncStatus === 'saved'
+                      ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-400'
+                      : cloudSyncStatus === 'error'
+                      ? 'bg-red-500/20 border-red-500/50 text-red-400'
+                      : 'bg-slate-800 border-[#c5a059]/30 text-[#c5a059] hover:bg-[#c5a059]/10 hover:border-[#c5a059]/60'
+                  }`}
+                  title="حفظ المكتبة في السحابة يدوياً"
+                >
+                  {cloudSyncStatus === 'saving' ? (
+                    <><span className="animate-spin inline-block">⟳</span> جاري الحفظ...</>
+                  ) : cloudSyncStatus === 'saved' ? (
+                    <>✓ تم الحفظ</>
+                  ) : cloudSyncStatus === 'error' ? (
+                    <>✗ فشل الحفظ</>
+                  ) : (
+                    <><Upload size={13} /> حفظ سحابي</>
+                  )}
+                </button>
+              )}
 
-              <div className="w-[1px] h-6 bg-white/10 mx-2 hidden md:block"></div>
-              
               {firebaseUser ? (
                  <div className="flex items-center gap-2">
                    <span className="text-xs text-slate-400 hidden sm:inline" title={firebaseUser.email || ''}>{firebaseUser.displayName?.split(' ')[0] || 'مستخدم'}</span>
@@ -851,6 +886,7 @@ const App: React.FC = () => {
              currentUserId={firebaseUser?.uid}
              setLibrary={setLibrary}
              onSyncNow={syncNow}
+             onDeletePage={handleDeletePage}
              onLoadPage={(book, page) => {
                setActiveSession({ bookTitle: book, currentPage: page.pageNumber });
                setLastProcessedPageId(page.id);
@@ -878,6 +914,7 @@ const App: React.FC = () => {
             onUpdatePage={handleUpdateBookPage}
             onUpdateWholeBook={handleUpdateWholeBook}
             onToggleStatus={() => handleToggleBookStatus(viewingBookTitle)}
+            onDeletePage={(pageId) => handleDeletePage(viewingBookTitle, pageId)}
           />
         )}
       </main>
@@ -890,11 +927,12 @@ const LibraryView: React.FC<{
   currentUserId?: string;
   setLibrary: React.Dispatch<React.SetStateAction<LibraryState>>;
   onSyncNow: (libraryData: LibraryState) => void;
+  onDeletePage: (bookTitle: string, pageId: string) => void;
   onLoadPage: (bookTitle: string, page: PageData) => void;
   onInsertPage: (bookTitle: string, afterPageNumber: number) => void;
   onUpdatePageNumber: (bookTitle: string, pageId: string, newNumber: number) => void;
   onOpenFullViewer: (bookTitle: string, mode: 'read' | 'edit') => void;
-}> = ({ library, currentUserId, setLibrary, onSyncNow, onLoadPage, onInsertPage, onUpdatePageNumber, onOpenFullViewer }) => {
+}> = ({ library, currentUserId, setLibrary, onSyncNow, onDeletePage, onLoadPage, onInsertPage, onUpdatePageNumber, onOpenFullViewer }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [downloadMenuOpen, setDownloadMenuOpen] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -1239,8 +1277,9 @@ const FullBookViewer: React.FC<{
   onClose: () => void, 
   onUpdatePage: (bookTitle: string, pageId: string, text: string) => void,
   onUpdateWholeBook: (bookTitle: string, parsedPages: {id: string, text: string}[]) => void,
-  onToggleStatus: () => void
-}> = ({ book, currentUserId, initialMode, onClose, onUpdatePage, onUpdateWholeBook, onToggleStatus }) => {
+  onToggleStatus: () => void,
+  onDeletePage: (pageId: string) => void
+}> = ({ book, currentUserId, initialMode, onClose, onUpdatePage, onUpdateWholeBook, onToggleStatus, onDeletePage }) => {
   const [toc, setToc] = useState<{id: string, title: string, level: number, page: number, index: number}[]>([]);
   const [showSidebar, setShowSidebar] = useState(true);
   const [mode, setMode] = useState<'read' | 'edit'>(initialMode);
@@ -1740,9 +1779,25 @@ const FullBookViewer: React.FC<{
                         </button>
                     </div>
 
-                    {/* RIGHT: Meta Info / Chapter */}
-                    <div className="hidden md:block text-xs text-slate-500 font-medium truncate max-w-[150px] text-left z-10">
+                    {/* RIGHT: Delete Page + Meta Info */}
+                    <div className="flex items-center gap-2 z-10">
+                      {(!book.ownerId || book.ownerId === currentUserId) && currentPageData && (
+                        <button
+                          onClick={() => {
+                            if (confirm(`حذف الصفحة ${currentPageData.pageNumber}؟`)) {
+                              onDeletePage(currentPageData.id);
+                              if (activePageIndex >= totalPages - 1) changePage(Math.max(0, activePageIndex - 1));
+                            }
+                          }}
+                          className="flex items-center gap-1 px-2 py-1 rounded-lg bg-red-900/30 border border-red-500/30 text-red-400 hover:bg-red-600/40 hover:text-red-200 transition-all text-xs font-bold"
+                          title="حذف هذه الصفحة نهائياً"
+                        >
+                          <Trash2 size={13}/> حذف صفحة
+                        </button>
+                      )}
+                      <div className="hidden md:block text-xs text-slate-500 font-medium truncate max-w-[100px] text-left">
                         {toc.find(t => t.page === currentPageData?.pageNumber)?.title || "..."}
+                      </div>
                     </div>
 
                 </div>
