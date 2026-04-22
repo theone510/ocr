@@ -53,4 +53,4 @@ export const SYSTEM_INSTRUCTION = `
 * المخرج الوحيد هو النص المستخرج بالتاغات المذكورة أعلاه. لا مقدمات ولا خاتمة.
 `;
 
-export const GEMINI_MODEL = 'gemini-3.1-pro-preview';
+export const GEMINI_MODEL = 'gemini-3-flash-preview';
