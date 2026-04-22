@@ -2,6 +2,7 @@
 import React, { useCallback, useRef, useState } from 'react';
 import { Upload, FileText, X, BookOpenCheck, Image as ImageIcon } from 'lucide-react';
 import { UploadedImage } from '../types';
+import { useToast } from './Toast';
 
 interface ImageUploaderProps {
   image: UploadedImage | null;
@@ -20,6 +21,7 @@ export const ImageUploader: React.FC<ImageUploaderProps> = ({
   isLoading,
   isPdfMode
 }) => {
+  const toast = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isDragging, setIsDragging] = useState(false);
 
@@ -63,7 +65,7 @@ export const ImageUploader: React.FC<ImageUploaderProps> = ({
       };
       reader.readAsDataURL(file);
     } else {
-      alert('الرجاء رفع ملف PDF أو صورة (JPG/PNG).');
+      toast.warning('الرجاء رفع ملف PDF أو صورة (JPG/PNG).');
     }
   };
 

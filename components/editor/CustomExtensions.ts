@@ -1,4 +1,4 @@
-import { Mark, Node, mergeAttributes } from '@tiptap/core';
+import { Mark, Node, mergeAttributes, RawCommands } from '@tiptap/core';
 
 // --- MARKS (Inline Elements) ---
 
@@ -57,9 +57,9 @@ export const PoetryNode = Node.create({
   },
   addCommands() {
     return {
-      setPoetry: () => ({ commands }) => commands.setNode('poetry'),
-      togglePoetry: () => ({ commands }) => commands.toggleNode('poetry', 'paragraph'),
-    };
+      setPoetry: () => ({ commands }: { commands: RawCommands }) => commands.setNode('poetry'),
+      togglePoetry: () => ({ commands }: { commands: RawCommands }) => commands.toggleNode('poetry', 'paragraph'),
+    } as unknown as Partial<RawCommands>;
   },
 });
 
@@ -75,9 +75,9 @@ export const CenterNode = Node.create({
   },
   addCommands() {
     return {
-      setCenterNode: () => ({ commands }) => commands.setNode('centerNode'),
-      toggleCenterNode: () => ({ commands }) => commands.toggleNode('centerNode', 'paragraph'),
-    };
+      setCenterNode: () => ({ commands }: { commands: RawCommands }) => commands.setNode('centerNode'),
+      toggleCenterNode: () => ({ commands }: { commands: RawCommands }) => commands.toggleNode('centerNode', 'paragraph'),
+    } as unknown as Partial<RawCommands>;
   },
 });
 

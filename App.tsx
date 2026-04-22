@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { PageData, Book, LibraryState, UploadedImage, LoadingState } from './types';
 import { analyzeManuscript } from './services/geminiService';
-import { auth, loginWithGoogle, logoutUser, syncLibraryToFirestore, loadLibraryFromFirestore, fetchPublicBooks, publishBookToPublic, unpublishBookFromPublic } from './services/firebaseService';
+import { auth, loginWithGoogle, logoutUser, syncSingleBook, deleteSingleBook, syncMeta, loadLibraryFromFirestore, fetchPublicBooks, publishBookToPublic, unpublishBookFromPublic } from './services/firebaseService';
 import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
 import { loadPDF, renderPageAsImage, PDFDocumentProxy } from './services/pdfService';
 import { ImageUploader } from './components/ImageUploader';
@@ -10,71 +10,44 @@ import { ResultDisplay } from './components/ResultDisplay';
 import { SessionSetup } from './components/SessionSetup';
 import { BatchControls } from './components/BatchControls';
 import { Button } from './components/Button';
-import { ContinuousEditor } from './components/editor/ContinuousEditor';
-import { extractPagesFromHTML } from './components/editor/EditorUtils';
-import { 
-  ScrollText, 
-  BookOpen, 
-  History,
-  Trash2,
-  ArrowRight,
+import { LibraryView } from './components/LibraryView';
+import { FullBookViewer } from './components/FullBookViewer';
+import { toHindi, generateId } from './utils/helpers';
+import { useToast } from './components/Toast';
+import { useConfirm } from './components/ConfirmModal';
+import { usePdfStartPage } from './components/PdfStartPageModal';
+import {
+  ScrollText,
+  BookOpen,
   LogOut,
-  FileText,
-  Download,
-  Eye,
-  Edit,
-  Save,
-  X,
+  ArrowRight,
   User,
-  Building2,
   BookCopy,
-  PlusCircle,
-  Hash,
-  PanelRightClose,
-  PanelRightOpen,
-  Calendar,
   MonitorDown,
   Upload,
-  Pencil,
-  BookOpenCheck,
-  ChevronRight,
-  ChevronLeft,
-  SkipForward,
-  SkipBack,
-  Search,
-  FileCode
 } from 'lucide-react';
 
-const STORAGE_KEY = 'manuscript_library_v2'; 
+
+const STORAGE_KEY = 'manuscript_library_v2';
 const CONCURRENT_PAGES = 1; // Sequential processing - parallel causes API rate limiting
 
-const generateId = () => Date.now().toString(36) + Math.random().toString(36).slice(2);
-
-// Helper to convert Western digits to Hindi digits
-export const toHindi = (num: number | string | undefined | null): string => {
-  if (num === undefined || num === null) return '';
-  return String(num).replace(/\d/g, d => "٠١٢٣٤٥٦٧٨٩"[parseInt(d)]);
-};
-
-// Helper to convert Hindi digits to Western digits (for import parsing)
-export const fromHindi = (str: string | undefined | null): string => {
-  if (!str) return '';
-  return str.replace(/[٠-٩]/g, d => "0123456789"["٠١٢٣٤٥٦٧٨٩".indexOf(d)]);
-};
-
 const App: React.FC = () => {
+  const toast = useToast();
+  const { confirm } = useConfirm();
+  const { promptPdfStartPage } = usePdfStartPage();
+
   const [showLanding, setShowLanding] = useState(true);
   const [library, setLibrary] = useState<LibraryState>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
       if (saved) {
-         const parsed = JSON.parse(saved);
-         if (!parsed.publishers) parsed.publishers = ['العتبة الحسينية المقدسة', 'دار المعارف', 'مؤسسة الأعلمي للمطبوعات'];
-         if (!parsed.authors) parsed.authors = ['آقا بزرگ الطهراني', 'الشيخ المفيد', 'الشريف المرتضى'];
-         return parsed;
+        const parsed = JSON.parse(saved);
+        if (!parsed.publishers) parsed.publishers = ['العتبة الحسينية المقدسة', 'دار المعارف', 'مؤسسة الأعلمي للمطبوعات'];
+        if (!parsed.authors) parsed.authors = ['آقا بزرگ الطهراني', 'الشيخ المفيد', 'الشريف المرتضى'];
+        return parsed;
       }
-      return { 
-        books: {}, 
+      return {
+        books: {},
         publishers: ['العتبة الحسينية المقدسة', 'دار المعارف', 'مؤسسة الأعلمي للمطبوعات'],
         authors: ['آقا بزرگ الطهراني', 'الشيخ المفيد', 'الشريف المرتضى']
       };
@@ -83,10 +56,10 @@ const App: React.FC = () => {
     }
   });
 
-  const [activeSession, setActiveSession] = useState<{bookTitle: string, currentPage: number} | null>(null);
+  const [activeSession, setActiveSession] = useState<{bookId: string, bookTitle: string, currentPage: number} | null>(null);
   const [view, setView] = useState<'setup' | 'workspace' | 'library' | 'full-viewer'>('setup');
   const [viewerMode, setViewerMode] = useState<'read' | 'edit'>('read');
-  const [viewingBookTitle, setViewingBookTitle] = useState<string | null>(null);
+  const [viewingBookId, setViewingBookId] = useState<string | null>(null);
   const [currentImage, setCurrentImage] = useState<UploadedImage | null>(null);
   const [loadingState, setLoadingState] = useState<LoadingState>(LoadingState.IDLE);
   const [error, setError] = useState<string | null>(null);
@@ -101,63 +74,110 @@ const App: React.FC = () => {
   const [pdfFileName, setPdfFileName] = useState<string>("");
   const [batchStatus, setBatchStatus] = useState<'idle' | 'running' | 'paused' | 'completed'>('idle');
   const [currentPdfPageIdx, setCurrentPdfPageIdx] = useState<number>(1); // 1-based index for PDF pages
-  
+
   // PWA Install State
-  const [installPrompt, setInstallPrompt] = useState<any>(null);
-  
+  const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
+
   const isCloudLoadedRef = useRef(false);
-  const syncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // 'idle' | 'saving' | 'saved' | 'error'
+  // Per-book debounce timers: bookId → timer ID
+  const bookSyncTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  // Books pending cloud sync (modified locally but not yet saved to Firestore)
+  const pendingBooksRef = useRef<Set<string>>(new Set());
+  // Flag: disable auto-sync during batch PDF processing
+  const batchRunningRef = useRef(false);
+  // Cloud sync status for UI
   const [cloudSyncStatus, setCloudSyncStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
 
-  // Manual cloud save — called only when user presses the save button
-  const handleManualCloudSave = async () => {
-    if (!firebaseUser || !isCloudLoadedRef.current) {
-      alert('يجب تسجيل الدخول أولاً للحفظ السحابي');
+  // ── Core: sync ONE book to Firestore after a 4-second debounce ────────────
+  const scheduleBookSync = (bookId: string, bookData: Book) => {
+    if (!firebaseUser || !isCloudLoadedRef.current) return;
+    // Don't auto-sync while batch is running (prevents write stream exhaustion)
+    if (batchRunningRef.current) {
+      pendingBooksRef.current.add(bookId);
       return;
     }
+    // Cancel previous timer for this book
+    if (bookSyncTimers.current[bookId]) {
+      clearTimeout(bookSyncTimers.current[bookId]);
+    }
+    pendingBooksRef.current.add(bookId);
+    bookSyncTimers.current[bookId] = setTimeout(async () => {
+      try {
+        await syncSingleBook(firebaseUser.uid, bookData);
+        pendingBooksRef.current.delete(bookId);
+        delete bookSyncTimers.current[bookId];
+      } catch (e) {
+        console.error(`Auto-sync failed for book "${bookData.title}":`, e);
+        // Keep in pending - user can manually save
+      }
+    }, 4000); // 4 second debounce per book
+  };
+
+  // ── Manual save: flush all pending books ──────────────────────────────────
+  const handleManualCloudSave = async () => {
+    if (!firebaseUser || !isCloudLoadedRef.current) {
+      toast.warning('يجب تسجيل الدخول أولاً للحفظ السحابي');
+      return;
+    }
+    // Cancel all pending debounce timers
+    Object.values(bookSyncTimers.current).forEach(clearTimeout);
+    bookSyncTimers.current = {};
+
+    const pending = [...pendingBooksRef.current];
+    const allPrivateBooks = Object.entries(library.books)
+      .filter(([_, b]) => !b.ownerId || b.ownerId === firebaseUser.uid);
+
+    // If nothing pending, sync everything (full resync)
+    const toSync = pending.length > 0
+      ? allPrivateBooks.filter(([bookId]) => pending.includes(bookId))
+      : allPrivateBooks;
+
+    if (toSync.length === 0) {
+      setCloudSyncStatus('saved');
+      setTimeout(() => setCloudSyncStatus('idle'), 2000);
+      return;
+    }
+
     setCloudSyncStatus('saving');
     try {
-      const privateLibrary = {
-        ...library,
-        books: Object.fromEntries(
-          Object.entries(library.books).filter(([_, b]) => !b.ownerId || b.ownerId === firebaseUser.uid)
-        )
-      };
-      await syncLibraryToFirestore(firebaseUser.uid, privateLibrary);
+      // Sync books ONE BY ONE — no batch, no stream exhaustion
+      for (const [, book] of toSync) {
+        await syncSingleBook(firebaseUser.uid, book);
+      }
+      // Sync metadata
+      await syncMeta(firebaseUser.uid, library.publishers ?? [], library.authors ?? []);
+      pendingBooksRef.current.clear();
       setCloudSyncStatus('saved');
       setTimeout(() => setCloudSyncStatus('idle'), 3000);
-    } catch (e) {
-      console.error(e);
+    } catch (e: unknown) {
+      console.error('Manual save failed:', e);
       setCloudSyncStatus('error');
-      setTimeout(() => setCloudSyncStatus('idle'), 4000);
+      setTimeout(() => setCloudSyncStatus('idle'), 5000);
     }
   };
 
-  // syncNow: immediate sync for deletions — also triggers only explicitly
-  const syncNow = async (libraryData: LibraryState) => {
+  // ── Immediate delete from cloud ───────────────────────────────────────────
+  const deleteBookFromCloud = async (bookId: string) => {
     if (!firebaseUser || !isCloudLoadedRef.current) return;
-    if (syncTimerRef.current) {
-      clearTimeout(syncTimerRef.current);
-      syncTimerRef.current = null;
+    // Cancel any pending sync for this book
+    if (bookSyncTimers.current[bookId]) {
+      clearTimeout(bookSyncTimers.current[bookId]);
+      delete bookSyncTimers.current[bookId];
     }
-    const privateLibrary = {
-      ...libraryData,
-      books: Object.fromEntries(
-        Object.entries(libraryData.books).filter(([_, b]) => !b.ownerId || b.ownerId === firebaseUser.uid)
-      )
-    };
+    pendingBooksRef.current.delete(bookId);
     try {
-      await syncLibraryToFirestore(firebaseUser.uid, privateLibrary);
+      await deleteSingleBook(firebaseUser.uid, bookId);
     } catch (e) {
-      console.error('syncNow error:', e);
+      console.error(`Failed to delete book (id: "${bookId}") from cloud:`, e);
     }
   };
+
+
 
   // Ref to handle loop control without dependency staleness
-  const batchControlRef = useRef({ 
-    shouldStop: false, 
-    activeBook: '', 
+  const batchControlRef = useRef({
+    shouldStop: false,
+    activeBookId: '',
     failedPages: [] as {pdfPage: number, manuscriptPage: number}[],
   });
 
@@ -213,18 +233,37 @@ const App: React.FC = () => {
     return () => unsubscribe();
   }, []);
 
-  // Save to localStorage only (NO automatic Firestore sync during editing/processing)
+  // ── Watch library changes → schedule per-book sync ────────────────────────
+  const prevLibraryRef = useRef<LibraryState | null>(null);
   useEffect(() => {
+    // Save to localStorage always
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(library));
     } catch (e) {
-      console.error('Storage Error', e);
+      console.error('localStorage error:', e);
     }
-  }, [library]);
+
+    if (!firebaseUser || !isCloudLoadedRef.current) return;
+    const prev = prevLibraryRef.current;
+
+    // Detect which books changed and schedule individual syncs
+    if (prev) {
+      for (const [bookId, book] of Object.entries(library.books)) {
+        if (!book.ownerId || book.ownerId === firebaseUser.uid) {
+          // Book is new or changed
+          if (prev.books[bookId] !== book) {
+            scheduleBookSync(bookId, book);
+          }
+        }
+      }
+    }
+
+    prevLibraryRef.current = library;
+  }, [library, firebaseUser]); // eslint-disable-line
 
   // Handle PWA Install Prompt
   useEffect(() => {
-    const handler = (e: any) => {
+    const handler = (e: BeforeInstallPromptEvent) => {
       e.preventDefault();
       setInstallPrompt(e);
     };
@@ -235,7 +274,7 @@ const App: React.FC = () => {
   const handleInstallApp = () => {
     if (installPrompt) {
       installPrompt.prompt();
-      installPrompt.userChoice.then((choiceResult: any) => {
+      installPrompt.userChoice.then((choiceResult) => {
         if (choiceResult.outcome === 'accepted') {
           setInstallPrompt(null);
         }
@@ -243,8 +282,8 @@ const App: React.FC = () => {
     }
   };
 
-  const handleStartSession = (data: { 
-    bookTitle: string, 
+  const handleStartSession = (data: {
+    bookTitle: string,
     startPage: number,
     author?: string,
     publisher?: string,
@@ -254,32 +293,39 @@ const App: React.FC = () => {
     isSeries?: boolean,
     volumeNumber?: string
   }) => {
-    if (!library.books[data.bookTitle]) {
-       setLibrary(prev => ({
-         ...prev,
-         books: {
-           ...prev.books,
-           [data.bookTitle]: {
-             title: data.bookTitle,
-             pages: [],
-             author: data.author,
-             publisher: data.publisher,
-             publicationPlace: data.publicationPlace,
-             publicationYear: data.publicationYear,
-             totalPages: data.totalPages,
-             isSeries: data.isSeries,
-             volumeNumber: data.volumeNumber
-           }
-         }
-       }));
+    // Find existing book by title (title is display name, not key)
+    const existingBook = Object.values(library.books).find(b => b.title === data.bookTitle);
+
+    if (!existingBook) {
+      const newId = generateId();
+      setLibrary(prev => ({
+        ...prev,
+        books: {
+          ...prev.books,
+          [newId]: {
+            id: newId,
+            title: data.bookTitle,
+            pages: [],
+            author: data.author,
+            publisher: data.publisher,
+            publicationPlace: data.publicationPlace,
+            publicationYear: data.publicationYear,
+            totalPages: data.totalPages,
+            isSeries: data.isSeries,
+            volumeNumber: data.volumeNumber
+          }
+        }
+      }));
+      setActiveSession({ bookId: newId, bookTitle: data.bookTitle, currentPage: data.startPage });
+    } else {
+      setActiveSession({ bookId: existingBook.id, bookTitle: existingBook.title, currentPage: data.startPage });
     }
 
-    setActiveSession({ bookTitle: data.bookTitle, currentPage: data.startPage });
     setView('workspace');
     setLastProcessedPageId(null);
     setCurrentImage(null);
     setLoadingState(LoadingState.IDLE);
-    
+
     // Reset Batch State on new session
     setPdfDoc(null);
     setBatchStatus('idle');
@@ -316,7 +362,7 @@ const App: React.FC = () => {
 
     try {
       const text = await analyzeManuscript(base64, mimeType);
-      
+
       if (activeSession) {
         const pageId = generateId();
         const newPage: PageData = {
@@ -328,19 +374,19 @@ const App: React.FC = () => {
         };
 
         setLibrary(prev => {
-          const currentBook = prev.books[activeSession.bookTitle];
+          const currentBook = prev.books[activeSession.bookId];
           if (!currentBook) return prev;
-          
+
           let updatedPages = [...currentBook.pages];
           const collisionIndex = updatedPages.findIndex(p => p.pageNumber === activeSession.currentPage);
-          
+
           if (collisionIndex !== -1) {
             // Shift pages if inserting in middle
             updatedPages = updatedPages.map(p => {
-               if (p.pageNumber >= activeSession.currentPage) {
-                 return { ...p, pageNumber: p.pageNumber + 1 };
-               }
-               return p;
+              if (p.pageNumber >= activeSession.currentPage) {
+                return { ...p, pageNumber: p.pageNumber + 1 };
+              }
+              return p;
             });
           }
           updatedPages.push(newPage);
@@ -350,7 +396,7 @@ const App: React.FC = () => {
             ...prev,
             books: {
               ...prev.books,
-              [activeSession.bookTitle]: { ...currentBook, pages: updatedPages }
+              [activeSession.bookId]: { ...currentBook, pages: updatedPages }
             }
           };
         });
@@ -370,33 +416,28 @@ const App: React.FC = () => {
 
   const handlePdfSelected = async (file: File) => {
     if (!activeSession) return;
-    
+
     setLoadingState(LoadingState.ANALYZING); // Show global loading while parsing PDF
     try {
       const doc = await loadPDF(file);
       setPdfDoc(doc);
       setPdfFileName(file.name);
       setLoadingState(LoadingState.IDLE);
-      
-      const suggestedPdfPage = 1; 
-      
-      const userStartPdfPage = prompt(
-        `تم تحميل ملف PDF يحتوي على ${doc.numPages} صفحة.\n\nمن أي صفحة في الـ PDF تريد بدء الاستخراج؟\n(أدخل رقم الصفحة في الـ PDF)`,
-        suggestedPdfPage.toString()
-      );
 
-      if (userStartPdfPage) {
-        const startIdx = parseInt(userStartPdfPage) || 1;
-        const safeStartIdx = Math.max(1, Math.min(startIdx, doc.numPages));
-        
+      const chosenPage = await promptPdfStartPage({ totalPages: doc.numPages });
+
+      if (chosenPage !== null) {
+        const safeStartIdx = Math.max(1, Math.min(chosenPage, doc.numPages));
+
         setCurrentPdfPageIdx(safeStartIdx);
-        
+
         batchControlRef.current = {
           shouldStop: false,
-          activeBook: activeSession.bookTitle,
+          activeBookId: activeSession.bookId,
           failedPages: [],
         };
-        
+        batchRunningRef.current = true;
+
         setBatchStatus('running');
         processBatchChunk(doc, safeStartIdx, activeSession.currentPage);
       } else {
@@ -406,24 +447,9 @@ const App: React.FC = () => {
 
     } catch (err) {
       console.error(err);
-      alert("فشل في قراءة ملف PDF. قد يكون معطوباً أو محمياً.");
+      toast.error('فشل في قراءة ملف PDF. قد يكون معطوباً أو محمياً.');
       setLoadingState(LoadingState.IDLE);
     }
-  };
-
-  // Process a single page: render + analyze + return result
-  const processSinglePage = async (doc: PDFDocumentProxy, pdfPageNum: number, manuscriptPageNum: number): Promise<{pageId: string, page: PageData, previewUrl: string}> => {
-    const { base64, mimeType, previewUrl } = await renderPageAsImage(doc, pdfPageNum);
-    const text = await analyzeManuscript(base64, mimeType);
-    const pageId = generateId();
-    const newPage: PageData = {
-      id: pageId,
-      pageNumber: manuscriptPageNum,
-      text: text,
-      timestamp: Date.now(),
-      previewUrl: ''
-    };
-    return { pageId, page: newPage, previewUrl };
   };
 
   // Process a chunk of pages (sequential with CONCURRENT_PAGES=1, or parallel if increased)
@@ -436,6 +462,7 @@ const App: React.FC = () => {
 
     if (startPdfPage > doc.numPages) {
       // All pages processed
+      batchRunningRef.current = false;
       const failed = batchControlRef.current.failedPages;
       if (failed.length > 0) {
         const failedList = failed.map(f => f.pdfPage).join(', ');
@@ -445,7 +472,7 @@ const App: React.FC = () => {
         setLoadingState(LoadingState.ERROR);
       } else {
         setBatchStatus('completed');
-        alert(`تم الانتهاء من معالجة الكتاب بالكامل (${doc.numPages} صفحة).`);
+        toast.success(`تم الانتهاء من معالجة الكتاب بالكامل (${doc.numPages} صفحة).`);
         setPdfDoc(null);
         setBatchStatus('idle');
         setLoadingState(LoadingState.IDLE);
@@ -477,9 +504,9 @@ const App: React.FC = () => {
       };
 
       setLibrary(prev => {
-        const currentBook = prev.books[batchControlRef.current.activeBook];
+        const currentBook = prev.books[batchControlRef.current.activeBookId];
         if (!currentBook) return prev;
-        
+
         let updatedPages = [...currentBook.pages];
         const collisionIndex = updatedPages.findIndex(p => p.pageNumber === startManuscriptPage);
         if (collisionIndex !== -1) {
@@ -497,7 +524,7 @@ const App: React.FC = () => {
           ...prev,
           books: {
             ...prev.books,
-            [batchControlRef.current.activeBook]: {
+            [batchControlRef.current.activeBookId]: {
               ...currentBook,
               pages: updatedPages
             }
@@ -530,21 +557,20 @@ const App: React.FC = () => {
 
   const pauseBatch = () => {
     batchControlRef.current.shouldStop = true;
+    batchRunningRef.current = false;
     setBatchStatus('paused');
     setLoadingState(LoadingState.IDLE);
   };
 
   const resumeBatch = () => {
     if (!pdfDoc || !activeSession) return;
-    
-    // If resuming after failed pages, retry them first
     const failed = batchControlRef.current.failedPages;
-    
     batchControlRef.current.shouldStop = false;
     batchControlRef.current.failedPages = [];
+    batchRunningRef.current = true;
     setBatchStatus('running');
     setError(null);
-    
+
     if (failed.length > 0) {
       // Retry failed pages by starting from the first failed page
       const firstFailed = failed.sort((a, b) => a.pdfPage - b.pdfPage)[0];
@@ -558,115 +584,122 @@ const App: React.FC = () => {
   const handleUpdatePageText = (newText: string) => {
     if (!activeSession || !lastProcessedPageId) return;
     setLibrary(prev => {
-      const book = prev.books[activeSession.bookTitle];
+      const book = prev.books[activeSession.bookId];
       if (!book) return prev;
       const updatedPages = book.pages.map(p => p.id === lastProcessedPageId ? { ...p, text: newText } : p);
-      return { ...prev, books: { ...prev.books, [activeSession.bookTitle]: { ...book, pages: updatedPages } } };
+      return { ...prev, books: { ...prev.books, [activeSession.bookId]: { ...book, pages: updatedPages } } };
     });
   };
 
-  const handleUpdateBookPage = (bookTitle: string, pageId: string, newText: string) => {
+  const handleUpdateBookPage = (bookId: string, pageId: string, newText: string) => {
     setLibrary(prev => {
-      const book = prev.books[bookTitle];
+      const book = prev.books[bookId];
       if (!book) return prev;
       const updatedPages = book.pages.map(p => p.id === pageId ? { ...p, text: newText } : p);
-      return { ...prev, books: { ...prev.books, [bookTitle]: { ...book, pages: updatedPages } } };
+      return { ...prev, books: { ...prev.books, [bookId]: { ...book, pages: updatedPages } } };
     });
   };
 
-  const handleToggleBookStatus = async (bookTitle: string) => {
-    const book = library.books[bookTitle];
+  const handleToggleBookStatus = async (bookId: string) => {
+    const book = library.books[bookId];
     if (!book) return;
-    
+
     if (book.status !== 'published') {
       if (!firebaseUser) {
-        alert("يجب تسجيل الدخول لنشر الكتب في المكتبة العامة.");
+        toast.warning('يجب تسجيل الدخول لنشر الكتب في المكتبة العامة.');
         return;
       }
       try {
         await publishBookToPublic(book, firebaseUser.uid);
       } catch (err) {
-        alert("فشل في نشر الكتاب للعامة");
+        toast.error('فشل في نشر الكتاب للعامة');
         return;
       }
     } else {
       if (firebaseUser && book.ownerId === firebaseUser.uid) {
         try {
-          await unpublishBookFromPublic(bookTitle);
+          await unpublishBookFromPublic(bookId);
         } catch (err) {
           console.error(err);
         }
       } else if (book.ownerId && (!firebaseUser || book.ownerId !== firebaseUser.uid)) {
-        alert("لا تملك صلاحية إلغاء نشر هذا الكتاب.");
+        toast.warning('لا تملك صلاحية إلغاء نشر هذا الكتاب.');
         return;
       }
     }
 
     setLibrary(prev => {
-      const b = prev.books[bookTitle];
+      const b = prev.books[bookId];
       if (!b) return prev;
       const newStatus = b.status === 'published' ? 'draft' : 'published';
-      return { 
-        ...prev, 
-        books: { 
-          ...prev.books, 
-          [bookTitle]: { 
-            ...b, 
-            status: newStatus as any, 
-            ownerId: firebaseUser ? firebaseUser.uid : b.ownerId 
-          } 
-        } 
-      };
-    });
-  };
-
-  const handleUpdateWholeBook = (bookTitle: string, parsedPages: {id: string, text: string}[]) => {
-    setLibrary(prev => {
-      const book = prev.books[bookTitle];
-      if (!book) return prev;
-      
-      const updatedPages = book.pages.map(p => {
-        const matchingParsed = parsedPages.find(pp => pp.id === p.id);
-        return matchingParsed ? { ...p, text: matchingParsed.text } : p;
-      });
-      
-      return { ...prev, books: { ...prev.books, [bookTitle]: { ...book, pages: updatedPages } } };
-    });
-  };
-
-  const handleDeletePage = (bookTitle: string, pageId: string) => {
-    if (!confirm('هل أنت متأكد من حذف هذه الصفحة؟')) return;
-    setLibrary(prev => {
-      const book = prev.books[bookTitle];
-      if (!book) return prev;
-      const updatedPages = book.pages.filter(p => p.id !== pageId);
-      return {
-        ...prev,
-        books: { ...prev.books, [bookTitle]: { ...book, pages: updatedPages } }
-      };
-    });
-  };
-
-  const handlePageNumberEdit = (bookTitle: string, pageId: string, newNumber: number) => {
-    setLibrary(prev => {
-      const book = prev.books[bookTitle];
-      if (!book) return prev;
-      
-      const updatedPages = book.pages.map(p => p.id === pageId ? { ...p, pageNumber: newNumber } : p)
-        .sort((a, b) => a.pageNumber - b.pageNumber);
-        
       return {
         ...prev,
         books: {
           ...prev.books,
-          [bookTitle]: { ...book, pages: updatedPages }
+          [bookId]: {
+            ...b,
+            status: newStatus as Book['status'],
+            ownerId: firebaseUser ? firebaseUser.uid : b.ownerId
+          }
         }
       };
     });
   };
 
-  const lastPageData = activeSession && lastProcessedPageId 
-    ? library.books[activeSession.bookTitle]?.pages.find(p => p.id === lastProcessedPageId) || null
+  const handleUpdateWholeBook = (bookId: string, parsedPages: {id: string, text: string}[]) => {
+    setLibrary(prev => {
+      const book = prev.books[bookId];
+      if (!book) return prev;
+
+      const updatedPages = book.pages.map(p => {
+        const matchingParsed = parsedPages.find(pp => pp.id === p.id);
+        return matchingParsed ? { ...p, text: matchingParsed.text } : p;
+      });
+
+      return { ...prev, books: { ...prev.books, [bookId]: { ...book, pages: updatedPages } } };
+    });
+  };
+
+  const handleDeletePage = async (bookId: string, pageId: string) => {
+    const ok = await confirm({
+      title: 'حذف الصفحة',
+      message: 'هل أنت متأكد من حذف هذه الصفحة؟ لا يمكن التراجع عن هذا الإجراء.',
+      confirmLabel: 'حذف',
+      cancelLabel: 'إلغاء',
+      dangerous: true,
+    });
+    if (!ok) return;
+    setLibrary(prev => {
+      const book = prev.books[bookId];
+      if (!book) return prev;
+      const updatedPages = book.pages.filter(p => p.id !== pageId);
+      return {
+        ...prev,
+        books: { ...prev.books, [bookId]: { ...book, pages: updatedPages } }
+      };
+    });
+  };
+
+  const handlePageNumberEdit = (bookId: string, pageId: string, newNumber: number) => {
+    setLibrary(prev => {
+      const book = prev.books[bookId];
+      if (!book) return prev;
+
+      const updatedPages = book.pages.map(p => p.id === pageId ? { ...p, pageNumber: newNumber } : p)
+        .sort((a, b) => a.pageNumber - b.pageNumber);
+
+      return {
+        ...prev,
+        books: {
+          ...prev.books,
+          [bookId]: { ...book, pages: updatedPages }
+        }
+      };
+    });
+  };
+
+  const lastPageData = activeSession && lastProcessedPageId
+    ? library.books[activeSession.bookId]?.pages.find(p => p.id === lastProcessedPageId) || null
     : null;
 
   if (showLanding) {
@@ -674,45 +707,45 @@ const App: React.FC = () => {
       <div className="fixed inset-0 z-[100] bg-slate-950 flex items-center justify-center p-4 overflow-hidden font-sans" dir="rtl">
          {/* Premium Radial Background */}
          <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-slate-900 via-slate-950 to-black"></div>
-         
+
          {/* Golden Glows */}
          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] bg-[#c5a059]/5 rounded-full blur-[100px] pointer-events-none"></div>
 
          <div className="relative z-10 flex flex-col items-center gap-8 text-center max-w-2xl w-full">
-             <div className="flex flex-col items-center justify-center mb-4">
-                <div className="w-32 h-32 md:w-40 md:h-40 bg-gradient-to-br from-slate-900 to-slate-950 rounded-full border border-[#c5a059]/30 flex items-center justify-center text-[#c5a059] shadow-[0_0_50px_rgba(197,160,89,0.15)] mb-8 ring-1 ring-white/5">
-                   <ScrollText size={64} strokeWidth={1} />
-                </div>
-                <h1 className="text-4xl md:text-6xl font-manuscript font-bold text-transparent bg-clip-text bg-gradient-to-b from-[#c5a059] to-[#8a6d32] leading-tight drop-shadow-sm mb-4">
-                   وحدة تنمية المقتنيات
-                </h1>
-                <p className="text-slate-400 text-lg md:text-xl font-light tracking-wide">
-                   العتبة الحسينية المقدسة
-                </p>
+           <div className="flex flex-col items-center justify-center mb-4">
+              <div className="w-32 h-32 md:w-40 md:h-40 bg-gradient-to-br from-slate-900 to-slate-950 rounded-full border border-[#c5a059]/30 flex items-center justify-center text-[#c5a059] shadow-[0_0_50px_rgba(197,160,89,0.15)] mb-8 ring-1 ring-white/5">
+                 <ScrollText size={64} strokeWidth={1} />
+              </div>
+              <h1 className="text-4xl md:text-6xl font-manuscript font-bold text-transparent bg-clip-text bg-gradient-to-b from-[#c5a059] to-[#8a6d32] leading-tight drop-shadow-sm mb-4">
+                 وحدة تنمية المقتنيات
+              </h1>
+              <p className="text-slate-400 text-lg md:text-xl font-light tracking-wide">
+                 العتبة الحسينية المقدسة
+              </p>
+           </div>
+
+           <div className="bg-slate-900/50 backdrop-blur-xl p-8 rounded-3xl border border-white/10 w-full max-w-md shadow-2xl ring-1 ring-black/50">
+             <p className="text-slate-300 text-lg mb-8 font-manuscript border-b border-white/5 pb-4">
+               نظام الأرشفة الذكي للمخطوطات والوثائق <span className="text-[#c5a059]">v4.0</span>
+             </p>
+             <div className="flex flex-col gap-3">
+               <button
+                 onClick={() => setShowLanding(false)}
+                 className="group w-full py-4 bg-gradient-to-r from-[#c5a059] to-[#9f7d3d] text-slate-900 font-bold text-xl rounded-xl shadow-[0_0_20px_rgba(197,160,89,0.2)] hover:shadow-[0_0_30px_rgba(197,160,89,0.4)] hover:scale-[1.02] transition-all duration-300 active:scale-95 flex items-center justify-center gap-3"
+               >
+                 <span>نظام الأرشفة</span>
+                 <ArrowRight className="group-hover:-translate-x-1 transition-transform" />
+               </button>
+
+               <button
+                 onClick={() => { setShowLanding(false); setView('library'); }}
+                 className="group w-full py-3 bg-slate-800 text-[#c5a059] font-bold text-lg rounded-xl border border-[#c5a059]/20 hover:bg-[#c5a059]/10 hover:border-[#c5a059]/50 transition-all duration-300 active:scale-95 flex items-center justify-center gap-3"
+               >
+                 <span>المكتبة الرقمية</span>
+                 <BookCopy size={20} />
+               </button>
              </div>
-             
-             <div className="bg-slate-900/50 backdrop-blur-xl p-8 rounded-3xl border border-white/10 w-full max-w-md shadow-2xl ring-1 ring-black/50">
-                 <p className="text-slate-300 text-lg mb-8 font-manuscript border-b border-white/5 pb-4">
-                   نظام الأرشفة الذكي للمخطوطات والوثائق <span className="text-[#c5a059]">v4.0</span>
-                 </p>
-                 <div className="flex flex-col gap-3">
-                   <button 
-                     onClick={() => setShowLanding(false)}
-                     className="group w-full py-4 bg-gradient-to-r from-[#c5a059] to-[#9f7d3d] text-slate-900 font-bold text-xl rounded-xl shadow-[0_0_20px_rgba(197,160,89,0.2)] hover:shadow-[0_0_30px_rgba(197,160,89,0.4)] hover:scale-[1.02] transition-all duration-300 active:scale-95 flex items-center justify-center gap-3"
-                   >
-                     <span>نظام الأرشفة</span>
-                     <ArrowRight className="group-hover:-translate-x-1 transition-transform" />
-                   </button>
-                   
-                   <button 
-                     onClick={() => { setShowLanding(false); setView('library'); }}
-                     className="group w-full py-3 bg-slate-800 text-[#c5a059] font-bold text-lg rounded-xl border border-[#c5a059]/20 hover:bg-[#c5a059]/10 hover:border-[#c5a059]/50 transition-all duration-300 active:scale-95 flex items-center justify-center gap-3"
-                   >
-                     <span>المكتبة الرقمية</span>
-                     <BookCopy size={20} />
-                   </button>
-                 </div>
-             </div>
+           </div>
          </div>
       </div>
     );
@@ -723,8 +756,8 @@ const App: React.FC = () => {
       {view !== 'full-viewer' && (
         <header className="sticky top-0 z-50 bg-slate-900/80 backdrop-blur-md border-b border-white/5 shadow-lg">
           <div className={`mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between transition-all duration-300 ${view === 'workspace' ? 'w-full' : 'max-w-7xl'}`}>
-            <div 
-              className="flex items-center gap-3 cursor-pointer hover:opacity-80 transition-opacity" 
+            <div
+              className="flex items-center gap-3 cursor-pointer hover:opacity-80 transition-opacity"
               onClick={() => setView('setup')}
             >
               <div className="p-2 bg-gradient-to-br from-[#c5a059] to-[#8a6d32] rounded-lg text-slate-900 shadow-md">
@@ -735,7 +768,7 @@ const App: React.FC = () => {
                 <p className="text-[10px] text-[#c5a059] font-medium opacity-90 tracking-wider">PLATINUM EDITION v4.0</p>
               </div>
             </div>
-            
+
             <nav className="flex items-center gap-2">
               {installPrompt && (
                 <Button size="sm" variant="secondary" onClick={handleInstallApp} className="animate-pulse">
@@ -791,18 +824,18 @@ const App: React.FC = () => {
               )}
 
               {firebaseUser ? (
-                 <div className="flex items-center gap-2">
-                   <span className="text-xs text-slate-400 hidden sm:inline" title={firebaseUser.email || ''}>{firebaseUser.displayName?.split(' ')[0] || 'مستخدم'}</span>
-                   <Button variant="ghost" size="sm" onClick={logoutUser} className="text-[#c5a059] hover:bg-[#c5a059]/10">
-                     <LogOut size={16} className="ml-2 hidden sm:block"/> خروج
-                   </Button>
-                 </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-slate-400 hidden sm:inline" title={firebaseUser.email || ''}>{firebaseUser.displayName?.split(' ')[0] || 'مستخدم'}</span>
+                  <Button variant="ghost" size="sm" onClick={logoutUser} className="text-[#c5a059] hover:bg-[#c5a059]/10">
+                    <LogOut size={16} className="ml-2 hidden sm:block"/> خروج
+                  </Button>
+                </div>
               ) : (
                 <Button variant="ghost" size="sm" onClick={async () => {
                   try {
                     await loginWithGoogle();
                   } catch (err: any) {
-                    alert('فشل تسجيل الدخول: ' + (err.message || 'خطأ غير معروف'));
+                    toast.error('فشل تسجيل الدخول: ' + (err.message || 'خطأ غير معروف'));
                   }
                 }} className="text-[#c5a059] hover:bg-[#c5a059]/10 bg-slate-800 border border-[#c5a059]/20">
                   <User size={16} className="ml-2 hidden sm:block"/> دخول سحابي
@@ -815,30 +848,30 @@ const App: React.FC = () => {
 
       <main className={`transition-all duration-300 ${view === 'full-viewer' ? '' : view === 'workspace' ? 'w-full px-4 sm:px-6 py-4' : 'max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 lg:py-12'}`}>
         {view === 'setup' && (
-          <SessionSetup 
-            library={library} 
-            onStartSession={handleStartSession} 
-            onOpenLibrary={() => setView('library')} 
+          <SessionSetup
+            library={library}
+            onStartSession={handleStartSession}
+            onOpenLibrary={() => setView('library')}
             onAddPublisher={handleAddPublisher}
             onAddAuthor={handleAddAuthor}
           />
         )}
-        
+
         {view === 'workspace' && activeSession && (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 lg:gap-6 lg:h-[calc(100vh-6rem)]">
             <section className="flex flex-col gap-4 h-full order-1 lg:order-1 min-h-[500px] lg:min-h-0">
-              
+
               {/* Batch Controls (Only Visible when PDF is loaded) */}
               {pdfDoc && batchStatus !== 'idle' && (
-                 <BatchControls 
-                   totalPDFPages={pdfDoc.numPages}
-                   currentPDFPage={currentPdfPageIdx}
-                   isProcessing={batchStatus === 'running'}
-                   isPaused={batchStatus === 'paused'}
-                   onPause={pauseBatch}
-                   onResume={resumeBatch}
-                   fileName={pdfFileName}
-                 />
+                <BatchControls
+                  totalPDFPages={pdfDoc.numPages}
+                  currentPDFPage={currentPdfPageIdx}
+                  isProcessing={batchStatus === 'running'}
+                  isPaused={batchStatus === 'paused'}
+                  onPause={pauseBatch}
+                  onResume={resumeBatch}
+                  fileName={pdfFileName}
+                />
               )}
 
               <div className="bg-slate-900 p-4 rounded-2xl shadow-2xl border border-white/5 flex-1 flex flex-col relative overflow-hidden">
@@ -857,18 +890,18 @@ const App: React.FC = () => {
                   </div>
                 </div>
                 <div className="flex-1 min-h-0 z-10">
-                  <ImageUploader 
-                    image={currentImage} 
+                  <ImageUploader
+                    image={currentImage}
                     onImageSelected={handleImageSelected}
                     onPdfSelected={handlePdfSelected}
-                    onClear={() => { 
-                      setCurrentImage(null); 
+                    onClear={() => {
+                      setCurrentImage(null);
                       setLoadingState(LoadingState.IDLE);
                       setBatchStatus('idle');
                       setPdfDoc(null);
                       batchControlRef.current.shouldStop = true;
-                    }} 
-                    isLoading={loadingState === LoadingState.ANALYZING} 
+                    }}
+                    isLoading={loadingState === LoadingState.ANALYZING}
                     isPdfMode={!!pdfDoc}
                   />
                 </div>
@@ -881,930 +914,45 @@ const App: React.FC = () => {
         )}
 
         {view === 'library' && (
-           <LibraryView 
-             library={library} 
-             currentUserId={firebaseUser?.uid}
-             setLibrary={setLibrary}
-             onSyncNow={syncNow}
-             onDeletePage={handleDeletePage}
-             onLoadPage={(book, page) => {
-               setActiveSession({ bookTitle: book, currentPage: page.pageNumber });
-               setLastProcessedPageId(page.id);
-               setView('workspace');
-             }}
-             onInsertPage={(bookTitle, afterPageNumber) => {
-               setActiveSession({ bookTitle, currentPage: afterPageNumber + 1 });
-               setView('workspace');
-             }}
-             onUpdatePageNumber={handlePageNumberEdit}
-             onOpenFullViewer={(bookTitle, mode) => {
-               setViewingBookTitle(bookTitle);
-               setViewerMode(mode);
-               setView('full-viewer');
-             }}
-           />
+          <LibraryView
+            library={library}
+            currentUserId={firebaseUser?.uid}
+            setLibrary={setLibrary}
+            onDeleteBookFromCloud={deleteBookFromCloud}
+            onDeletePage={handleDeletePage}
+            onLoadPage={(bookId, page) => {
+              const bookTitle = library.books[bookId]?.title || '';
+              setActiveSession({ bookId, bookTitle, currentPage: page.pageNumber });
+              setLastProcessedPageId(page.id);
+              setView('workspace');
+            }}
+            onInsertPage={(bookId, afterPageNumber) => {
+              const bookTitle = library.books[bookId]?.title || '';
+              setActiveSession({ bookId, bookTitle, currentPage: afterPageNumber + 1 });
+              setView('workspace');
+            }}
+            onUpdatePageNumber={handlePageNumberEdit}
+            onOpenFullViewer={(bookId, mode) => {
+              setViewingBookId(bookId);
+              setViewerMode(mode);
+              setView('full-viewer');
+            }}
+          />
         )}
 
-        {view === 'full-viewer' && viewingBookTitle && (
-          <FullBookViewer 
-            book={library.books[viewingBookTitle]} 
+        {view === 'full-viewer' && viewingBookId && (
+          <FullBookViewer
+            book={library.books[viewingBookId]}
             currentUserId={firebaseUser?.uid}
             initialMode={viewerMode}
-            onClose={() => setView('library')} 
+            onClose={() => setView('library')}
             onUpdatePage={handleUpdateBookPage}
             onUpdateWholeBook={handleUpdateWholeBook}
-            onToggleStatus={() => handleToggleBookStatus(viewingBookTitle)}
-            onDeletePage={(pageId) => handleDeletePage(viewingBookTitle, pageId)}
+            onToggleStatus={() => handleToggleBookStatus(viewingBookId)}
+            onDeletePage={(pageId) => handleDeletePage(viewingBookId, pageId)}
           />
         )}
       </main>
-    </div>
-  );
-};
-
-const LibraryView: React.FC<{
-  library: LibraryState;
-  currentUserId?: string;
-  setLibrary: React.Dispatch<React.SetStateAction<LibraryState>>;
-  onSyncNow: (libraryData: LibraryState) => void;
-  onDeletePage: (bookTitle: string, pageId: string) => void;
-  onLoadPage: (bookTitle: string, page: PageData) => void;
-  onInsertPage: (bookTitle: string, afterPageNumber: number) => void;
-  onUpdatePageNumber: (bookTitle: string, pageId: string, newNumber: number) => void;
-  onOpenFullViewer: (bookTitle: string, mode: 'read' | 'edit') => void;
-}> = ({ library, currentUserId, setLibrary, onSyncNow, onDeletePage, onLoadPage, onInsertPage, onUpdatePageNumber, onOpenFullViewer }) => {
-  const [searchTerm, setSearchTerm] = useState('');
-  const [downloadMenuOpen, setDownloadMenuOpen] = useState<string | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  
-  // FIX: Cast Object.values to Book[] to prevent 'unknown' type errors
-  const books = (Object.values(library.books) as Book[]).filter(book => 
-    book.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    (book.author && book.author.toLowerCase().includes(searchTerm.toLowerCase()))
-  );
-
-  const handleDeleteBook = (title: string) => {
-    // eslint-disable-next-line no-restricted-globals
-    if (confirm(`هل أنت متأكد من حذف كتاب "${title}" وكافة صفحاته؟`)) {
-      setLibrary(prev => {
-        const newBooks = { ...prev.books };
-        delete newBooks[title];
-        const newLibrary = { ...prev, books: newBooks };
-        // Immediately sync deletion to Firestore (bypass debounce)
-        onSyncNow(newLibrary);
-        return newLibrary;
-      });
-    }
-  };
-
-  const handleImportHTML = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    try {
-      const text = await file.text();
-      const parser = new DOMParser();
-      const doc = parser.parseFromString(text, 'text/html');
-
-      const titleEl = doc.querySelector('.book-title');
-      if (!titleEl) throw new Error('الملف لا يحتوي على عنوان كتاب صحيح (class="book-title")');
-      
-      const title = titleEl.textContent?.trim() || "كتاب مستورد";
-      
-      let author = "";
-      let publisher = "";
-      let publicationPlace = "";
-      let publicationYear = "";
-      
-      doc.querySelectorAll('.book-meta p').forEach(p => {
-        const txt = p.textContent || "";
-        if (txt.includes('تأليف:')) author = txt.split('تأليف:')[1].trim();
-        if (txt.includes('إصدار:')) publisher = txt.split('إصدار:')[1].trim();
-        if (txt.includes('مكان النشر:')) publicationPlace = txt.split('مكان النشر:')[1].trim();
-        if (txt.includes('سنة النشر:')) publicationYear = txt.split('سنة النشر:')[1].trim();
-      });
-
-      const pageContainers = doc.querySelectorAll('.page-container');
-      if (pageContainers.length === 0) throw new Error('لا توجد صفحات في الملف (class="page-container")');
-
-      const newPages: PageData[] = [];
-      pageContainers.forEach(container => {
-         const pageNumEl = container.querySelector('.page-number');
-         const contentEl = container.querySelector('.manuscript-content');
-         
-         if (pageNumEl && contentEl) {
-           const pageNum = parseInt(fromHindi(pageNumEl.textContent || "0"));
-           if (isNaN(pageNum)) return;
-           
-           let content = contentEl.innerHTML;
-           content = content.replace(/\s+id="heading-[^"]*"/g, '');
-           content = fromHindi(content);
-
-           newPages.push({
-             id: generateId(),
-             pageNumber: pageNum,
-             text: content,
-             timestamp: Date.now(),
-             previewUrl: '' 
-           });
-         }
-      });
-
-      if (newPages.length === 0) throw new Error('لم يتم استخراج أي صفحات صالحة');
-
-      setLibrary(prev => {
-        const existingBook = prev.books[title];
-        let mergedPages = existingBook ? [...existingBook.pages] : [];
-        
-        newPages.forEach(np => {
-           const idx = mergedPages.findIndex(p => p.pageNumber === np.pageNumber);
-           if (idx !== -1) {
-             mergedPages[idx] = { ...mergedPages[idx], text: np.text };
-           } else {
-             mergedPages.push(np);
-           }
-        });
-        
-        mergedPages.sort((a,b) => a.pageNumber - b.pageNumber);
-
-        return {
-          ...prev,
-          books: {
-            ...prev.books,
-            [title]: {
-              title,
-              author: author || existingBook?.author,
-              publisher: publisher || existingBook?.publisher,
-              publicationPlace: publicationPlace || existingBook?.publicationPlace,
-              publicationYear: publicationYear || existingBook?.publicationYear,
-              pages: mergedPages,
-              totalPages: Math.max(mergedPages.length, existingBook?.totalPages || 0),
-              isSeries: existingBook?.isSeries,
-              volumeNumber: existingBook?.volumeNumber
-            }
-          }
-        };
-      });
-      
-      alert(`تم استيراد ${newPages.length} صفحة وضمها للكتاب: ${title}`);
-
-    } catch (err: any) {
-      console.error(err);
-      alert('فشل استيراد الملف: ' + err.message);
-    } finally {
-      if (fileInputRef.current) fileInputRef.current.value = '';
-    }
-  };
-
-  const downloadHTML = (book: Book) => {
-    const css = `
-      @import url('https://fonts.googleapis.com/css2?family=Amiri:ital,wght@0,400;0,700;1,400&family=Cairo:wght@300;400;500;600;700&display=swap');
-      body { font-family: 'Amiri', serif; direction: rtl; background: #fdfbf7; color: #1e293b; padding: 40px; max-width: 900px; margin: 0 auto; }
-      .book-header { text-align: center; margin-bottom: 60px; border-bottom: 2px solid #e2e8f0; padding-bottom: 30px; }
-      .book-title { font-size: 42px; font-weight: bold; color: #b45309; margin-bottom: 10px; }
-      .book-meta { font-family: 'Cairo', sans-serif; color: #64748b; font-size: 14px; }
-      .page-container { margin-bottom: 50px; padding-bottom: 30px; border-bottom: 1px dashed #cbd5e1; position: relative; }
-      .page-number { font-family: 'Cairo', sans-serif; font-size: 12px; color: #b45309; background: #fff7ed; padding: 4px 12px; border-radius: 20px; border: 1px solid #ffedd5; display: inline-block; margin-bottom: 20px; }
-      .content { font-size: 22px; line-height: 2.4; text-align: justify; }
-      
-      h1 { display: block; font-size: 2.2rem; font-weight: 800; color: #0f172a; margin: 1.5rem 0; border-right: 6px solid #c5a059; padding-right: 1.5rem; }
-      h2 { display: block; font-size: 1.8rem; font-weight: 700; color: #334155; margin: 1.2rem 0; border-right: 4px solid #94a3b8; padding-right: 1rem; }
-      h3 { display: block; font-size: 1.4rem; font-weight: 700; color: #475569; margin: 1rem 0; border-right: 2px solid #64748b; padding-right: 0.75rem; }
-      .center { display: block; text-align: center; margin: 1.5rem 0; font-weight: bold; font-size: 1.4rem; color: #334155; }
-      .bold { font-weight: 800; color: #000; }
-      .aya { color: #059669; background: rgba(16, 185, 129, 0.05); padding: 0 4px; border-radius: 4px; border-bottom: 1px solid #10b981; }
-      .hadith { color: #2563eb; background: rgba(37, 99, 235, 0.05); padding: 0 4px; border-radius: 4px; border-bottom: 1px solid #3b82f6; }
-      .poetry { display: block; text-align: center; font-style: italic; margin: 2rem auto; color: #1e293b; background: #f1f5f9; padding: 20px; border-radius: 12px; border-right: 4px solid #94a3b8; border-left: 4px solid #94a3b8; width: 80%; }
-      .footnote { display: block; font-size: 1.1rem; color: #64748b; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #e2e8f0; font-style: italic; font-family: 'Cairo', sans-serif; }
-    `;
-
-    let htmlContent = `<!DOCTYPE html><html dir="rtl"><head><meta charset="UTF-8"><title>${book.title}</title><style>${css}</style></head><body>
-        <div class="book-header">
-          <h1 class="book-title">${book.title}</h1>
-          <div class="book-meta">
-            <span>تأليف: ${book.author || 'غير معروف'}</span> • 
-            <span>الناشر: ${book.publisher || 'غير معروف'}</span> • 
-            <span>${toHindi(book.pages.length)} صفحة</span>
-          </div>
-        </div>`;
-
-    // Sort pages
-    const sortedPages = [...book.pages].sort((a,b) => a.pageNumber - b.pageNumber);
-
-    sortedPages.forEach(page => {
-      let processedText = page.text
-        .replace(/(?:\r\n|\r|\n)+\s*(\[\d+\])/g, ' $1')
-        .replace(/\n+/g, '<br/>')
-        .replace(/<(h[1-3])>(.*?)<\/\1>/g, '<$1>$2</$1>')
-        .replace(/<center>(.*?)<\/center>/g, '<span class="center">$1</span>')
-        .replace(/<bold>(.*?)<\/bold>/g, '<span class="bold">$1</span>')
-        .replace(/<aya>(.*?)<\/aya>/g, '<span class="aya">$1</span>')
-        .replace(/<hadith>(.*?)<\/hadith>/g, '<span class="hadith">$1</span>')
-        .replace(/<poetry>(.*?)<\/poetry>/g, '<div class="poetry">$1</div>')
-        .replace(/<footnote>(.*?)<\/footnote>/gs, '<div class="footnote">$1</div>')
-        .replace(/\[(\d+)\]/g, (match, d) => `[${toHindi(d)}]`);
-
-      htmlContent += `
-        <div class="page-container">
-          <span class="page-number">صفحة ${toHindi(page.pageNumber)}</span>
-          <div class="content">${processedText}</div>
-        </div>`;
-    });
-
-    htmlContent += `</body></html>`;
-
-    const blob = new Blob([htmlContent], { type: 'text/html' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${book.title}_طباعة.html`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    setDownloadMenuOpen(null);
-  };
-
-  const downloadText = (book: Book) => {
-    let content = ` الكتاب: ${book.title}\n المؤلف: ${book.author || 'غير معروف'}\n الناشر: ${book.publisher || 'غير معروف'}\n\n=========================================\n\n`;
-    
-    const sortedPages = [...book.pages].sort((a,b) => a.pageNumber - b.pageNumber);
-    
-    sortedPages.forEach(page => {
-      content += `--- صفحة ${toHindi(page.pageNumber)} ---\n\n`;
-      let text = page.text
-         .replace(/<footnote>(\d+):(.*?)<\/footnote>/gs, '\n   [$1] $2') // Format footnotes
-         .replace(/<[^>]+>/g, '') // Strip other tags
-         .replace(/\[(\d+)\]/g, (match, d) => `[${toHindi(d)}]`) // Hindi digits refs
-         .trim();
-      
-      content += text + "\n\n\n";
-    });
-
-    const blob = new Blob([content], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${book.title}_نص.txt`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setDownloadMenuOpen(null);
-  };
-
-  return (
-    <div className="space-y-6 animate-in fade-in duration-500 relative">
-      {/* Backdrop for menu */}
-      {downloadMenuOpen && <div className="fixed inset-0 z-30" onClick={() => setDownloadMenuOpen(null)}></div>}
-
-      <div className="flex flex-col md:flex-row gap-4 justify-between items-center bg-slate-900 p-6 rounded-2xl border border-white/5 shadow-xl">
-        <div>
-          <h2 className="text-2xl font-bold text-white flex items-center gap-2">
-            <BookCopy size={24} className="text-[#c5a059]"/>
-            المكتبة المركزية
-          </h2>
-          <p className="text-slate-400 text-sm mt-1">إدارة الأرشيف والمخطوطات</p>
-           <input 
-             type="file" 
-             ref={fileInputRef} 
-             accept=".html,.htm" 
-             className="hidden" 
-             onChange={handleImportHTML} 
-           />
-           <Button variant="outline" size="sm" onClick={() => fileInputRef.current?.click()} className="mt-2 border-dashed border-slate-600 text-slate-400 hover:border-[#c5a059] hover:text-[#c5a059]">
-              <Upload size={16} className="ml-2" /> استيراد (HTML)
-           </Button>
-        </div>
-        <div className="relative w-full md:w-96">
-           <Search className="absolute right-3 top-3 text-slate-500" size={20} />
-           <input 
-             type="text" 
-             placeholder="بحث عن كتاب أو مؤلف..." 
-             value={searchTerm}
-             onChange={(e) => setSearchTerm(e.target.value)}
-             className="w-full pr-10 pl-4 py-3 bg-slate-800 border border-slate-700 rounded-xl focus:ring-1 focus:ring-[#c5a059] text-white outline-none"
-           />
-        </div>
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
-        {books.map(book => (
-          <div key={book.title} className="bg-slate-900 border border-white/5 rounded-2xl overflow-hidden hover:border-[#c5a059]/30 transition-all hover:shadow-2xl hover:shadow-[#c5a059]/5 flex flex-col group">
-            <div className="p-6 flex-1">
-              <div className="flex justify-between items-start mb-4">
-                <div className="p-3 bg-slate-800 rounded-lg text-[#c5a059]">
-                  <BookOpen size={24} />
-                </div>
-                <div className="flex gap-2 relative z-40">
-                   <div className="relative">
-                      <button 
-                         onClick={() => setDownloadMenuOpen(downloadMenuOpen === book.title ? null : book.title)} 
-                         className={`p-2 rounded-lg transition-colors ${downloadMenuOpen === book.title ? 'bg-[#c5a059] text-slate-900' : 'hover:bg-slate-800 text-slate-500 hover:text-white'}`} 
-                         title="خيارات التنزيل"
-                       >
-                         <Download size={18} />
-                       </button>
-                       {downloadMenuOpen === book.title && (
-                          <div className="absolute top-full left-0 mt-2 w-56 bg-slate-900 border border-[#c5a059]/30 rounded-xl shadow-2xl overflow-hidden animate-in fade-in slide-in-from-top-2 z-50 ring-1 ring-black">
-                             <button onClick={() => downloadHTML(book)} className="w-full flex items-center gap-3 px-4 py-3 text-sm text-slate-200 hover:bg-slate-800 hover:text-[#c5a059] transition-colors text-right border-b border-white/5">
-                                <div className="p-1.5 bg-orange-500/10 rounded text-orange-500"><FileCode size={16}/></div>
-                                <div className="flex flex-col items-start">
-                                   <span className="font-bold">نسخة HTML</span>
-                                   <span className="text-[10px] text-slate-500">بنفس تنسيق العرض</span>
-                                </div>
-                             </button>
-                             <button onClick={() => downloadText(book)} className="w-full flex items-center gap-3 px-4 py-3 text-sm text-slate-200 hover:bg-slate-800 hover:text-[#c5a059] transition-colors text-right">
-                                <div className="p-1.5 bg-blue-500/10 rounded text-blue-500"><FileText size={16}/></div>
-                                <div className="flex flex-col items-start">
-                                   <span className="font-bold">نسخة نصية</span>
-                                   <span className="text-[10px] text-slate-500">بدون وسوم (TXT)</span>
-                                </div>
-                             </button>
-                          </div>
-                       )}
-                   </div>
-                   {(!book.ownerId || book.ownerId === currentUserId) && (
-                     <button onClick={() => handleDeleteBook(book.title)} className="p-2 hover:bg-red-900/20 rounded-lg text-slate-500 hover:text-red-500" title="حذف">
-                       <Trash2 size={18} />
-                     </button>
-                   )}
-                </div>
-              </div>
-              <div className="flex items-center gap-2 mb-2">
-                 <h3 className="text-xl font-bold text-white line-clamp-1">{toHindi(book.title)}</h3>
-                 <span className={`px-2 py-0.5 rounded text-[10px] font-bold tracking-wider ${book.status === 'published' ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-amber-500/10 text-amber-500 border border-amber-500/20'}`}>
-                    {book.status === 'published' ? 'مُعتمد' : 'مسودة'}
-                 </span>
-              </div>
-              
-              <div className="space-y-2 text-sm text-slate-400 mb-6 font-mono">
-                {book.author && <div className="flex items-center gap-2"><User size={14}/> <span>{toHindi(book.author)}</span></div>}
-                {book.publisher && <div className="flex items-center gap-2"><Building2 size={14}/> <span>{toHindi(book.publisher)}</span></div>}
-                <div className="flex items-center gap-2"><FileText size={14}/> <span>{toHindi(book.pages.length)} صفحة مؤرشفة</span></div>
-              </div>
-            </div>
-
-            <div className="bg-slate-950/50 p-4 border-t border-white/5 flex items-center justify-between gap-2">
-               <div className="flex gap-2 w-full">
-                 <Button size="sm" variant="secondary" onClick={() => onOpenFullViewer(book.title, 'read')} className="flex-1 text-xs">
-                   <Eye size={14} className="ml-1"/> تصفح
-                 </Button>
-                 {(!book.ownerId || book.ownerId === currentUserId) && (
-                   <Button size="sm" variant="primary" onClick={() => onInsertPage(book.title, book.pages.length > 0 ? Math.max(...book.pages.map(p=>p.pageNumber)) : 0)} className="flex-1 text-xs">
-                     <PlusCircle size={14} className="ml-1"/> إضافة
-                   </Button>
-                 )}
-               </div>
-            </div>
-          </div>
-        ))}
-      </div>
-      
-      {books.length === 0 && (
-        <div className="text-center py-20 bg-slate-900/50 rounded-3xl border border-dashed border-slate-800">
-           <BookOpen size={48} className="mx-auto text-slate-700 mb-4" />
-           <p className="text-slate-500 text-lg">لا توجد كتب مطابقة للبحث</p>
-        </div>
-      )}
-    </div>
-  );
-};
-
-const FullBookViewer: React.FC<{
-  book: Book, 
-  currentUserId?: string,
-  initialMode: 'read' | 'edit',
-  onClose: () => void, 
-  onUpdatePage: (bookTitle: string, pageId: string, text: string) => void,
-  onUpdateWholeBook: (bookTitle: string, parsedPages: {id: string, text: string}[]) => void,
-  onToggleStatus: () => void,
-  onDeletePage: (pageId: string) => void
-}> = ({ book, currentUserId, initialMode, onClose, onUpdatePage, onUpdateWholeBook, onToggleStatus, onDeletePage }) => {
-  const [toc, setToc] = useState<{id: string, title: string, level: number, page: number, index: number}[]>([]);
-  const [showSidebar, setShowSidebar] = useState(true);
-  const [mode, setMode] = useState<'read' | 'edit'>(initialMode);
-  
-  // SYNC VIEW STATE (Local Only)
-  const [syncPdfDoc, setSyncPdfDoc] = useState<PDFDocumentProxy | null>(null);
-  const [syncImageUrl, setSyncImageUrl] = useState<string | null>(null);
-  const [isSyncingPdf, setIsSyncingPdf] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-
-  // PAGE FLIPPING LOGIC
-  const [activePageIndex, setActivePageIndex] = useState(0);
-  const totalPages = book.pages.length;
-  
-  // Ref for scroll container to handle pagination on scroll
-  const scrollRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    setMode(initialMode);
-  }, [initialMode]);
-
-  // Keyboard Navigation
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (mode === 'read') {
-        if (e.key === 'ArrowRight') handlePrevPage();
-        if (e.key === 'ArrowLeft') handleNextPage();
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [mode, activePageIndex]);
-
-  useEffect(() => {
-    const extractedToc: any[] = [];
-    book.pages.forEach((p, idx) => {
-      const matches = p.text.matchAll(/<(h[1-5])>(.*?)<\/\1>/g);
-      for (const match of matches) {
-        // Strip nested tags like <bold> or <center> from the heading text for the index
-        const cleanTitle = match[2].replace(/<[^>]+>/g, '').trim();
-        extractedToc.push({
-          id: `heading-${extractedToc.length}`,
-          title: cleanTitle,
-          level: parseInt(match[1].substring(1)),
-          page: p.pageNumber,
-          index: idx // Store index for direct navigation
-        });
-      }
-    });
-    setToc(extractedToc);
-  }, [book]);
-
-  const changePage = (index: number, targetHeadingTitle?: string) => {
-    if (index < 0 || index >= totalPages) return;
-    
-    setActivePageIndex(index);
-    
-    setTimeout(() => {
-        if (mode === 'read') {
-            if (scrollRef.current) scrollRef.current.scrollTop = 0;
-            if (targetHeadingTitle) {
-                const headings = document.querySelectorAll('.viewer-h1, .viewer-h2, .viewer-h3, .viewer-h4, .viewer-h5');
-                const target = Array.from(headings).find(h => h.textContent === toHindi(targetHeadingTitle));
-                if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
-            }
-        } else {
-            // Edit mode continuous editor scroll
-            const edScroll = document.getElementById('tiptap-scroll-container');
-            if (edScroll) {
-                if (targetHeadingTitle) {
-                    const headings = edScroll.querySelectorAll('.ProseMirror h1, .ProseMirror h2, .ProseMirror h3, .ProseMirror h4, .ProseMirror h5');
-                    const target = Array.from(headings).find(h => h.textContent === targetHeadingTitle);
-                    if (target) {
-                        target.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                        return;
-                    }
-                }
-                const targetPageNum = book.pages[index]?.pageNumber.toString();
-                if (targetPageNum) {
-                    const targetBreak = Array.from(edScroll.querySelectorAll('.page-break')).find(b => b.getAttribute('data-page-number') === targetPageNum);
-                    if (targetBreak) {
-                        targetBreak.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                    } else if (index === 0) {
-                        edScroll.scrollTop = 0;
-                    }
-                }
-            }
-        }
-    }, 100);
-  };
-
-  const handleChangeHeadingLevel = (item: any, newLevel: number) => {
-      const page = book.pages.find(p => p.pageNumber === item.page);
-      if (!page) return;
-      
-      const newText = page.text.replace(/<(h[1-5])>(.*?)<\/\1>/g, (match, tag, title) => {
-          const cleanTitle = title.replace(/<[^>]+>/g, '').trim();
-          if (cleanTitle === item.title) {
-              return `<h${newLevel}>${title}</h${newLevel}>`;
-          }
-          return match;
-      });
-      if (newText !== page.text) {
-          onUpdatePage(book.title, page.id, newText);
-      }
-  };
-
-  const handleMergeWithNextHeading = (item: any) => {
-      const currentIdx = toc.findIndex(t => t === item);
-      if (currentIdx === -1 || currentIdx + 1 >= toc.length) return;
-      const nextItem = toc[currentIdx + 1];
-      
-      if (item.page === nextItem.page) {
-          const page = book.pages.find(p => p.pageNumber === item.page);
-          if (!page) return;
-          
-          let firstFound = false;
-          let mergedTitleInner = '';
-          const tempText = page.text.replace(/<(h[1-5])>(.*?)<\/\1>/g, (match, tag, title) => {
-              const cleanTitle = title.replace(/<[^>]+>/g, '').trim();
-              if (cleanTitle === item.title && !firstFound) {
-                  firstFound = true;
-                  mergedTitleInner = title;
-                  return `___MERGE_TARGET___`; 
-              }
-              if (cleanTitle === nextItem.title && firstFound) {
-                  return `<${tag}>${mergedTitleInner} - ${title}</${tag}>`;
-              }
-              return match;
-          });
-          
-          const finalText = tempText.replace(`___MERGE_TARGET___\\s*\\n*`, '').replace(`___MERGE_TARGET___`, '');
-          onUpdatePage(book.title, page.id, finalText);
-      } else {
-          alert('الدمج بين العناوين في صفحات مختلفة غير مدعوم من الفهرس السريع، استخدم المحرر המتصل.');
-      }
-  };
-
-  const handleRemoveHeading = (item: any) => {
-      const page = book.pages.find(p => p.pageNumber === item.page);
-      if (!page) return;
-      
-      const newText = page.text.replace(/<(h[1-5])>(.*?)<\/\1>/g, (match, tag, title) => {
-          const cleanTitle = title.replace(/<[^>]+>/g, '').trim();
-          if (cleanTitle === item.title) {
-              return title; // return inner text without tags
-          }
-          return match;
-      });
-      if (newText !== page.text) {
-          onUpdatePage(book.title, page.id, newText);
-      }
-  };
-
-  const handleNextPage = () => changePage(activePageIndex + 1);
-  const handlePrevPage = () => changePage(activePageIndex - 1);
-
-  const currentPageData = book.pages[activePageIndex];
-
-  const renderReadMode = () => {
-    if (!currentPageData) return null;
-    
-    let headingIdx = 0; // This is naive for paging, but keeps IDs somewhat consistent locally
-    // Fix: Pull footnote references inline by collapsing preceding newlines/spaces
-    let pageHtml = currentPageData.text
-        .replace(/(?:\r\n|\r|\n)+\s*(\[\d+\])/g, ' $1') // FIX: Aggressive collapse
-        .replace(/\n+/g, '<br/>')
-        .replace(/<(h[1-5])>(.*?)<\/\1>/g, (match, tag, title) => {
-          const id = `heading-${headingIdx++}`;
-          return `<${tag} id="${id}" class="viewer-${tag}">${toHindi(title)}</${tag}>`;
-        })
-        .replace(/<center>(.*?)<\/center>/g, '<div class="viewer-center">$1</div>')
-        .replace(/<bold>(.*?)<\/bold>/g, '<span class="viewer-bold">$1</span>')
-        .replace(/<aya>(.*?)<\/aya>/g, '<span class="viewer-aya">$1</span>')
-        .replace(/<hadith>(.*?)<\/hadith>/g, '<span class="viewer-hadith">$1</span>')
-        .replace(/<poetry>(.*?)<\/poetry>/g, '<div class="viewer-poetry">$1</div>')
-        .replace(/<footnote>(.*?)<\/footnote>/gs, (match, content) => {
-           // Extract footnote number for ID
-           return `<div class="viewer-footnote">${toHindi(content)}</div>`;
-        })
-        .replace(/\[(\d+)\]/g, (match, d) => `[${toHindi(d)}]`);
-
-    return (
-        <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
-            <div id={`page-${currentPageData.pageNumber}`} className="p-6 md:p-8 pb-32 bg-slate-900 border border-slate-800 rounded-3xl shadow-2xl relative min-h-[70vh]">
-            <div 
-                className="font-manuscript text-3xl leading-[2.4] text-justify text-slate-200 whitespace-pre-wrap selection:bg-[#c5a059]/30"
-                dangerouslySetInnerHTML={{ __html: pageHtml }}
-            />
-            </div>
-        </div>
-    );
-  };
-
-  const handleContinuousEditorChange = (html: string) => {
-      // Split the HTML using extractPagesFromHTML
-      const extractedPages = extractPagesFromHTML(html, book.pages);
-      onUpdateWholeBook(book.title, extractedPages);
-  };
-
-  const handleEditorActivePageChange = (pageNum: number) => {
-      const index = book.pages.findIndex(p => p.pageNumber === pageNum);
-      if (index >= 0 && index !== activePageIndex) {
-          setActivePageIndex(index);
-      }
-  };
-
-  const handleUploadSyncPdf = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setIsSyncingPdf(true);
-    try {
-      const pdf = await loadPDF(file);
-      setSyncPdfDoc(pdf);
-    } catch(err) {
-      console.error(err);
-      alert('فشل تحميل الـ PDF المرجعي للاستلام المؤقت.');
-    }
-    setIsSyncingPdf(false);
-  };
-
-  useEffect(() => {
-     if (syncPdfDoc && mode === 'edit') {
-         const renderPdfSync = async () => {
-             // Assuming user wants to sync with logical page number
-             const pageNum = book.pages[activePageIndex]?.pageNumber || activePageIndex + 1;
-             try {
-                const result = await renderPageAsImage(syncPdfDoc, pageNum);
-                setSyncImageUrl(result.previewUrl);
-             } catch(err) {
-                console.error("Failed to render sync page", err);
-                // Fallback to empty if it exceeds bounds or fails
-                setSyncImageUrl(null);
-             }
-         };
-         renderPdfSync();
-     }
-  }, [syncPdfDoc, activePageIndex, mode, book.pages]);
-
-  return (
-    <div className="flex h-screen bg-slate-950 overflow-hidden relative" dir="rtl">
-      <style>{`
-        .viewer-h1 { display: block; font-size: 2.5rem; font-weight: 800; color: #f1f5f9; margin: 1.5rem 0; border-right: 6px solid #c5a059; padding-right: 1.5rem; }
-        .viewer-h2 { display: block; font-size: 1.8rem; font-weight: 700; color: #e2e8f0; margin: 1.2rem 0; border-right: 4px solid #94a3b8; padding-right: 1rem; }
-        .viewer-h3 { display: block; font-size: 1.4rem; font-weight: 700; color: #cbd5e1; margin: 1rem 0; border-right: 2px solid #64748b; padding-right: 0.75rem; }
-        .viewer-h4 { display: block; font-size: 1.2rem; font-weight: 700; color: #94a3b8; margin: 0.8rem 0; border-right: 2px solid #475569; padding-right: 0.5rem; }
-        .viewer-h5 { display: block; font-size: 1rem; font-weight: 700; color: #64748b; margin: 0.6rem 0; border-right: 2px solid #334155; padding-right: 0.5rem; }
-        .viewer-center { display: block; text-align: center; margin: 1.5rem 0; font-weight: bold; font-size: 1.4rem; color: #e2e8f0; }
-        .viewer-bold { font-weight: 800; color: #fff; }
-        .viewer-aya { color: #10b981; background: rgba(16, 185, 129, 0.1); padding: 0 4px; border-radius: 4px; border-bottom: 2px solid #059669; }
-        .viewer-hadith { color: #60a5fa; background: rgba(96, 165, 250, 0.1); padding: 0 4px; border-radius: 4px; border-bottom: 2px solid #2563eb; }
-        .viewer-poetry { display: block; text-align: center; font-style: italic; margin: 2rem auto; color: #e2e8f0; background: rgba(30, 41, 59, 0.5); padding: 20px; border-radius: 12px; border-right: 4px solid #334155; border-left: 4px solid #334155; }
-        .viewer-footnote { display: block; font-size: 1.1rem; color: #94a3b8; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #334155; font-style: italic; font-family: 'Cairo', sans-serif; }
-        
-        /* Modern Slider Styles */
-        input[type=range] {
-            -webkit-appearance: none; 
-            background: transparent; 
-        }
-        input[type=range]::-webkit-slider-thumb {
-            -webkit-appearance: none;
-            height: 20px;
-            width: 20px;
-            border-radius: 50%;
-            background: #c5a059;
-            cursor: pointer;
-            margin-top: -8px;
-            box-shadow: 0 0 10px rgba(197, 160, 89, 0.5);
-        }
-        input[type=range]::-webkit-slider-runnable-track {
-            width: 100%;
-            height: 4px;
-            cursor: pointer;
-            background: rgba(255,255,255,0.1);
-            border-radius: 2px;
-        }
-      `}</style>
-      
-      {!showSidebar && (
-        <div className="fixed top-6 right-6 z-50 flex flex-col gap-2 animate-in fade-in slide-in-from-right-4 duration-300">
-          <button onClick={() => setShowSidebar(true)} className="p-3 bg-slate-800 text-slate-300 shadow-lg rounded-full hover:bg-slate-700 hover:text-white transition-all border border-slate-700"><PanelRightOpen size={24} /></button>
-          <button onClick={onClose} className="p-3 bg-slate-800 text-slate-500 shadow-lg rounded-full hover:bg-red-900/20 hover:text-red-500 transition-all border border-slate-700 mt-2"><LogOut size={24} /></button>
-        </div>
-      )}
-
-      {showSidebar && (
-        <aside className="w-80 bg-slate-900 border-l border-white/5 flex flex-col shadow-2xl z-40 animate-in slide-in-from-right duration-300">
-          <div className="p-4 border-b border-white/5 flex items-center justify-between">
-            <div className="flex items-center gap-2 text-[#c5a059]">
-              <ScrollText size={20} />
-              <h2 className="font-bold text-lg">فهرست الكتاب</h2>
-            </div>
-            <div className="flex items-center gap-1">
-              <button onClick={() => setShowSidebar(false)} className="p-2 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-white transition-colors"><PanelRightClose size={20} /></button>
-              <button onClick={onClose} className="p-2 hover:bg-red-900/20 rounded-lg text-slate-400 hover:text-red-500 transition-colors"><LogOut size={20} /></button>
-            </div>
-          </div>
-          <div className="flex-1 overflow-y-auto p-4 space-y-1 scrollbar-thin scrollbar-thumb-slate-700">
-            {toc.length === 0 ? <p className="text-center text-slate-600 text-sm mt-10">لم يتم رصد عناوين في المتن</p> : toc.map((item, i) => (
-                <div key={i} className={`w-full text-right flex flex-col gap-1 p-3 rounded-xl transition-all border border-transparent group ${activePageIndex === item.index ? 'bg-[#c5a059]/20 border-[#c5a059]/30' : 'hover:bg-slate-800/50 hover:border-slate-700'} ${item.level === 1 ? 'mt-4 bg-slate-800/30' : ''}`}>
-                  <button 
-                      onClick={() => changePage(item.index, item.title)}
-                      className="w-full text-right flex flex-col"
-                  >
-                     <span className={`font-bold leading-snug ${item.level === 1 ? 'text-sm text-[#c5a059]' : item.level === 2 ? 'text-[13px] pr-4 text-slate-300' : 'text-[12px] pr-8 text-slate-500'}`}>{toHindi(item.title)}</span>
-                     <span className="text-[10px] text-slate-600 font-bold self-end group-hover:text-[#c5a059] transition-colors font-mono mt-1">ص {toHindi(item.page)}</span>
-                  </button>
-
-                  {/* QUICK EDIT TOOLS FOR TOC */}
-                  {mode === 'edit' && (
-                      <div className="flex items-center justify-end gap-1 mt-2 opacity-0 group-hover:opacity-100 transition-opacity flex-wrap">
-                         <button onClick={(e) => { e.stopPropagation(); handleChangeHeadingLevel(item, 1) }} className="text-[10px] bg-slate-700 px-1 py-0.5 rounded text-slate-300 hover:bg-[#c5a059] hover:text-slate-900 font-bold transition-colors">H1</button>
-                         <button onClick={(e) => { e.stopPropagation(); handleChangeHeadingLevel(item, 2) }} className="text-[10px] bg-slate-700 px-1 py-0.5 rounded text-slate-300 hover:bg-slate-300 hover:text-slate-900 font-bold transition-colors">H2</button>
-                         <button onClick={(e) => { e.stopPropagation(); handleChangeHeadingLevel(item, 3) }} className="text-[10px] bg-slate-700 px-1 py-0.5 rounded text-slate-300 hover:bg-slate-400 hover:text-slate-900 font-bold transition-colors">H3</button>
-                         <button onClick={(e) => { e.stopPropagation(); handleChangeHeadingLevel(item, 4) }} className="text-[10px] bg-slate-700 px-1 py-0.5 rounded text-slate-300 hover:bg-slate-500 hover:text-slate-900 font-bold transition-colors">H4</button>
-                         <button onClick={(e) => { e.stopPropagation(); handleChangeHeadingLevel(item, 5) }} className="text-[10px] bg-slate-700 px-1 py-0.5 rounded text-slate-300 hover:bg-slate-600 hover:text-slate-900 font-bold transition-colors">H5</button>
-                         <button onClick={(e) => { e.stopPropagation(); handleMergeWithNextHeading(item) }} className="text-[10px] bg-blue-900/50 border border-blue-500/30 px-1.5 py-0.5 rounded text-blue-300 hover:bg-blue-600 hover:text-white font-bold transition-colors ml-1" title="دمج مع العنوان التالي بالأسفل">دمج</button>
-                         <button onClick={(e) => { e.stopPropagation(); handleRemoveHeading(item) }} className="text-[10px] bg-red-900/50 border border-red-500/30 px-1.5 py-0.5 rounded text-red-300 hover:bg-red-600 hover:text-white font-bold transition-colors ml-1" title="إزالة العنوان وتحويله لنص عادي">حذف</button>
-                      </div>
-                  )}
-                </div>
-            ))}
-          </div>
-        </aside>
-      )}
-
-      {/* Main Content Area - Single Page View */}
-      <div className="flex-1 relative flex flex-col bg-slate-950 overflow-hidden">
-        
-        {/* Top Info Bar */}
-        <div className="bg-slate-900/80 backdrop-blur-md border-b border-white/5 px-8 py-4 flex items-center justify-between z-10 transition-all">
-           <div className="flex flex-col">
-              <div className="flex items-center gap-3">
-                 <h1 className="text-xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-white to-slate-400 tracking-tight">{toHindi(book.title)}</h1>
-                 <button 
-                     onClick={onToggleStatus} 
-                     className={`px-2 py-0.5 rounded text-[10px] font-bold tracking-wider transition-colors ${book.status === 'published' ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/50 hover:bg-emerald-500/30' : 'bg-amber-500/20 text-amber-500 border border-amber-500/50 hover:bg-amber-500/30'}`}
-                     title="اضغط لتغيير حالة الاعتماد"
-                 >
-                    {book.status === 'published' ? 'معتمد 100%' : 'قيد التدقيق (مسودة)'}
-                 </button>
-              </div>
-              <div className="flex items-center gap-2 text-xs text-slate-500 font-mono mt-1">
-                 <span>{toHindi(book.publisher)}</span>
-                 <span className="w-1 h-1 bg-slate-600 rounded-full"></span>
-                 <span className={activePageIndex === totalPages - 1 ? 'text-emerald-500' : ''}>Page {toHindi(currentPageData?.pageNumber)} of {toHindi(totalPages)}</span>
-                 {mode === 'edit' && (
-                     <>
-                        <span className="w-1 h-1 bg-slate-600 rounded-full mx-1"></span>
-                        <input type="file" ref={fileInputRef} accept="application/pdf" className="hidden" onChange={handleUploadSyncPdf} />
-                        <button 
-                            onClick={() => syncPdfDoc ? setSyncPdfDoc(null) : fileInputRef.current?.click()}
-                            className={`flex items-center gap-1.5 px-2 py-0.5 rounded border transition-colors ${syncPdfDoc ? 'bg-red-500/10 text-red-400 border-red-500/30 hover:bg-red-500/20' : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'}`}
-                        >
-                            {isSyncingPdf ? <span className="animate-pulse">جاري التحميل...</span> : syncPdfDoc ? <><X size={12}/> إغلاق المرفق</> : <><Upload size={12}/> إرفاق PDF للمطابقة</>}
-                        </button>
-                     </>
-                 )}
-              </div>
-           </div>
-           
-           <div className="flex items-center gap-2 bg-slate-900 p-1 rounded-lg border border-slate-800 shadow-inner">
-                <button onClick={() => setMode('read')} className={`px-4 py-2 rounded-md text-sm font-bold transition-all ${mode === 'read' ? 'bg-[#c5a059] text-slate-900 shadow' : 'text-slate-500 hover:bg-slate-800'}`}>
-                    <span className="flex items-center gap-2"><BookOpenCheck size={16}/> قراءة</span>
-                </button>
-                {(!book.ownerId || book.ownerId === currentUserId) && (
-                  <button onClick={() => setMode('edit')} className={`px-4 py-2 rounded-md text-sm font-bold transition-all ${mode === 'edit' ? 'bg-slate-700 text-white shadow' : 'text-slate-500 hover:bg-slate-800'}`}>
-                      <span className="flex items-center gap-2"><Pencil size={16}/> تحرير</span>
-                  </button>
-                )}
-            </div>
-        </div>
-
-        <div className="flex-1 flex overflow-hidden">
-            {/* OPTIONAL SPLIT VIEW FOR PDF SYNC */}
-            {syncPdfDoc && mode === 'edit' && (
-                <div className="hidden lg:flex flex-col w-1/2 border-l border-slate-800 bg-slate-950 p-4 overflow-y-auto animate-in fade-in slide-in-from-left duration-500">
-                    <div className="text-center mb-2 flex items-center justify-center gap-2 text-slate-500 text-sm font-bold bg-slate-900 py-2 rounded-lg border border-slate-800 shadow-inner">
-                        <MonitorDown size={16} className="text-[#c5a059]" /> النص الأصلي المرفق - صفحة {toHindi(book.pages[activePageIndex]?.pageNumber)}
-                    </div>
-                    <div className="flex-1 flex items-center justify-center bg-slate-900 rounded-xl border border-slate-800 overflow-hidden shadow-2xl p-2 relative">
-                        {syncImageUrl ? (
-                            <img src={syncImageUrl} className="max-w-full max-h-full object-contain rounded drop-shadow-lg pointer-events-none select-none" alt="Manuscript Source" />
-                        ) : (
-                            <div className="flex flex-col items-center text-slate-600 animate-pulse">
-                                <BookCopy size={32} className="mb-2 opacity-50" />
-                                <span>جاري معالجة صورة الصفحة...</span>
-                            </div>
-                        )}
-                    </div>
-                </div>
-            )}
-
-            {/* Scrollable Page / Editor Content */}
-            <div 
-                ref={scrollRef}
-                className={`flex-1 ${mode === 'read' ? 'overflow-y-auto pb-32' : 'overflow-hidden'} scroll-smooth transition-all ${syncPdfDoc && mode === 'edit' ? 'lg:w-1/2' : 'w-full'}`}
-            > 
-                <div className={`mx-auto transition-all duration-300 ${mode === 'edit' ? 'h-full w-full flex flex-col' : (showSidebar ? 'py-4 px-4 max-w-4xl' : 'py-4 px-4 max-w-5xl')}`}>
-                    {mode === 'read' ? (
-                        renderReadMode()
-                    ) : (
-                        <div className="animate-in fade-in slide-in-from-bottom-4 duration-500 flex-1 h-full w-full flex flex-col p-4">
-                            <ContinuousEditor 
-                                pages={book.pages} 
-                                onChange={handleContinuousEditorChange}
-                                onActivePageChange={handleEditorActivePageChange}
-                                readOnly={false} 
-                            />
-                        </div>
-                    )}
-                </div>
-            </div>
-        </div>
-
-        {/* --- LUXURY FLOATING BOTTOM DOCK --- */}
-        <div className="absolute bottom-8 left-1/2 transform -translate-x-1/2 z-50 w-full max-w-2xl px-4">
-            <div className="bg-slate-900/90 backdrop-blur-xl border border-white/10 rounded-2xl shadow-2xl p-4 flex flex-col gap-3 ring-1 ring-black/50">
-                
-                {/* Progress Slider */}
-                <div className="relative group">
-                    <input 
-                        type="range" 
-                        min="0" 
-                        max={totalPages - 1} 
-                        value={activePageIndex} 
-                        onChange={(e) => changePage(parseInt(e.target.value))}
-                        className="w-full h-1 bg-slate-700 rounded-lg appearance-none cursor-pointer focus:outline-none"
-                    />
-                    <div 
-                        className="absolute top-0 right-0 h-1 bg-[#c5a059] rounded-lg pointer-events-none" 
-                        style={{ width: `${((activePageIndex) / (totalPages - 1)) * 100}%` }}
-                    ></div>
-                    {/* Tooltip on hover */}
-                    <div className="absolute bottom-6 right-0 transform translate-x-1/2 opacity-0 group-hover:opacity-100 transition-opacity bg-slate-800 text-white text-xs font-mono py-1 px-2 rounded border border-white/10 pointer-events-none" style={{ right: `${100 - ((activePageIndex) / (totalPages - 1)) * 100}%` }}>
-                       ص {toHindi(book.pages[activePageIndex]?.pageNumber)}
-                    </div>
-                </div>
-
-                {/* Controls Row - CENTERED LAYOUT */}
-                <div className="flex items-center justify-between relative h-10">
-                    
-                    {/* LEFT: Page Jump Input */}
-                    <div className="flex items-center gap-2 z-10">
-                        <span className="text-xs text-slate-500 font-bold uppercase tracking-wider">Page</span>
-                        <div className="relative">
-                            <input 
-                                type="text" 
-                                value={activePageIndex + 1}
-                                onChange={(e) => {
-                                    const val = parseInt(e.target.value);
-                                    if (!isNaN(val) && val > 0 && val <= totalPages) {
-                                        changePage(val - 1);
-                                    }
-                                }}
-                                className="w-12 bg-slate-800 border border-slate-700 rounded-lg text-center text-white text-sm font-mono py-1 focus:ring-1 focus:ring-[#c5a059] outline-none"
-                            />
-                            <span className="absolute -right-3 top-1 text-slate-600 text-xs">/</span>
-                        </div>
-                        <span className="text-xs text-slate-500 font-mono ml-2">{toHindi(totalPages)}</span>
-                    </div>
-
-                    {/* CENTER: Navigation Buttons (ABSOLUTE) */}
-                    <div className="absolute left-1/2 top-1/2 transform -translate-x-1/2 -translate-y-1/2 flex items-center gap-4 z-0">
-                        <button 
-                            onClick={() => changePage(0)}
-                            disabled={activePageIndex === 0}
-                            className="text-slate-500 hover:text-white disabled:opacity-30 transition-colors"
-                            title="البداية"
-                        >
-                            <SkipForward size={20} />
-                        </button>
-                        <button 
-                            onClick={handlePrevPage}
-                            disabled={activePageIndex === 0}
-                            className="w-10 h-10 rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center text-[#c5a059] hover:bg-[#c5a059] hover:text-slate-900 transition-all shadow-lg disabled:opacity-50 disabled:cursor-not-allowed active:scale-95"
-                        >
-                            <ChevronRight size={24} />
-                        </button>
-                        
-                        <div className="h-4 w-[1px] bg-slate-700 mx-2"></div>
-
-                        <button 
-                            onClick={handleNextPage}
-                            disabled={activePageIndex === totalPages - 1}
-                            className="w-10 h-10 rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center text-[#c5a059] hover:bg-[#c5a059] hover:text-slate-900 transition-all shadow-lg disabled:opacity-50 disabled:cursor-not-allowed active:scale-95"
-                        >
-                            <ChevronLeft size={24} />
-                        </button>
-                        <button 
-                            onClick={() => changePage(totalPages - 1)}
-                            disabled={activePageIndex === totalPages - 1}
-                            className="text-slate-500 hover:text-white disabled:opacity-30 transition-colors"
-                            title="النهاية"
-                        >
-                            <SkipBack size={20} />
-                        </button>
-                    </div>
-
-                    {/* RIGHT: Delete Page + Meta Info */}
-                    <div className="flex items-center gap-2 z-10">
-                      {(!book.ownerId || book.ownerId === currentUserId) && currentPageData && (
-                        <button
-                          onClick={() => {
-                            if (confirm(`حذف الصفحة ${currentPageData.pageNumber}؟`)) {
-                              onDeletePage(currentPageData.id);
-                              if (activePageIndex >= totalPages - 1) changePage(Math.max(0, activePageIndex - 1));
-                            }
-                          }}
-                          className="flex items-center gap-1 px-2 py-1 rounded-lg bg-red-900/30 border border-red-500/30 text-red-400 hover:bg-red-600/40 hover:text-red-200 transition-all text-xs font-bold"
-                          title="حذف هذه الصفحة نهائياً"
-                        >
-                          <Trash2 size={13}/> حذف صفحة
-                        </button>
-                      )}
-                      <div className="hidden md:block text-xs text-slate-500 font-medium truncate max-w-[100px] text-left">
-                        {toc.find(t => t.page === currentPageData?.pageNumber)?.title || "..."}
-                      </div>
-                    </div>
-
-                </div>
-            </div>
-        </div>
-
-      </div>
     </div>
   );
 };

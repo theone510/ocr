@@ -1,4 +1,4 @@
-import { toHindi, fromHindi } from '../../App';
+import { toHindi, fromHindi } from '../../utils/helpers';
 
 /**
  * Transforms the RAW database text (with custom pseudo-tags) 

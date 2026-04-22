@@ -8,7 +8,8 @@ export interface PageData {
 }
 
 export interface Book {
-  title: string;
+  id: string;                // Stable UUID — used as Firestore doc ID
+  title: string;             // Human-visible name (mutable)
   author?: string;
   publisher?: string;
   publicationPlace?: string; // New

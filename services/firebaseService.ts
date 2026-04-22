@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 import { initializeApp } from "firebase/app";
-import { getFirestore, doc, setDoc, getDoc, collection, getDocs, deleteDoc, writeBatch } from "firebase/firestore";
+import { getFirestore, doc, setDoc, getDoc, collection, getDocs, deleteDoc } from "firebase/firestore";
 import { getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, signOut } from "firebase/auth";
 import { LibraryState, Book } from "../types";
 
@@ -32,196 +32,150 @@ try {
   console.error("Firebase initialization error:", error);
 }
 
-// Auth Functions
+// ─────────────────────────────────────────────────────────────────────────────
+// Auth
+// ─────────────────────────────────────────────────────────────────────────────
+
 export const loginWithGoogle = async () => {
+  if (!auth || !googleProvider) throw new Error("Firebase auth is not initialized");
   try {
-    if (!auth || !googleProvider) {
-      throw new Error("Firebase auth is not initialized");
+    await signInWithPopup(auth, googleProvider);
+  } catch (popupError: any) {
+    if (
+      popupError.code === 'auth/popup-blocked' ||
+      popupError.code === 'auth/popup-closed-by-user' ||
+      popupError.message?.includes('Cross-Origin')
+    ) {
+      await signInWithRedirect(auth, googleProvider);
+    } else {
+      throw popupError;
     }
-    try {
-      await signInWithPopup(auth, googleProvider);
-    } catch (popupError: any) {
-      if (
-        popupError.code === 'auth/popup-blocked' ||
-        popupError.code === 'auth/popup-closed-by-user' ||
-        popupError.message?.includes('Cross-Origin')
-      ) {
-        console.log("Popup blocked, falling back to redirect...");
-        await signInWithRedirect(auth, googleProvider);
-      } else {
-        throw popupError;
-      }
-    }
-  } catch (error) {
-    console.error("Error logging in:", error);
-    throw error;
   }
 };
 
 export const logoutUser = async () => {
-  try {
-    await signOut(auth!);
-  } catch (error) {
-    console.error("Error logging out:", error);
-    throw error;
-  }
+  await signOut(auth!);
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// NEW SUBCOLLECTION APPROACH
-// Structure:
-//   users/{userId}/books/{bookTitle}   ← one doc per book (no 1 MB limit issue)
-//   users/{userId}/meta/info           ← publishers & authors lists
+// SUSTAINABLE SYNC ARCHITECTURE
+//
+// Design principles:
+//   1. ONE book = ONE Firestore document (no 1MB limit issue)
+//   2. Writes are per-book atomic operations, NOT batch writes of the whole library
+//   3. No “read before write” — we just write what we have
+//   4. Deletions are immediate and direct
+//   5. No WebSocket write stream abuse — each write is independent
+//
+// Firestore structure:
+//   users/{userId}/books/{book.id}   ← UUID, NOT the Arabic title (production-safe)
+//   users/{userId}/meta/info         ← publishers & authors
+//
+// MIGRATION NOTE:
+//   Legacy documents that used book.title as the doc ID are kept as-is.
+//   On the next read, loadLibraryFromFirestore stamps id = docSnap.id if missing.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Sync the full library using subcollections.
- * Each book is stored as its own Firestore document so we never hit the 1 MB limit.
- * Deleted books are removed from Firestore via a batch delete.
+ * Write a SINGLE book document to Firestore.
+ * Uses book.id (UUID) as the document key — never the mutable title.
  */
-export const syncLibraryToFirestore = async (userId: string, library: LibraryState) => {
-  if (!db) {
-    console.warn("DB not initialized, falling back to localStorage");
-    return;
-  }
-  try {
-    // 1. Save metadata (publishers & authors)
-    const metaRef = doc(db, "users", userId, "meta", "info");
-    await setDoc(metaRef, {
-      publishers: library.publishers ?? [],
-      authors: library.authors ?? [],
-    });
+export const syncSingleBook = async (userId: string, book: Book): Promise<void> => {
+  if (!db) throw new Error("Firestore not initialized");
+  const bookRef = doc(db, "users", userId, "books", book.id);
+  await setDoc(bookRef, book);
+};
 
-    // 2. Get existing book IDs from Firestore
-    const booksCol = collection(db, "users", userId, "books");
-    const existingSnap = await getDocs(booksCol);
-    const existingIds = new Set(existingSnap.docs.map(d => d.id));
+/**
+ * Delete a SINGLE book document from Firestore immediately.
+ * Accepts the stable book UUID (book.id), not the title.
+ */
+export const deleteSingleBook = async (userId: string, bookId: string): Promise<void> => {
+  if (!db) throw new Error("Firestore not initialized");
+  await deleteDoc(doc(db, "users", userId, "books", bookId));
+};
 
-    // 3. Write/update each book document (Firestore limit: 500 ops per batch)
-    const bookEntries = Object.entries(library.books);
-    const BATCH_SIZE = 400;
-
-    for (let i = 0; i < bookEntries.length; i += BATCH_SIZE) {
-      const batch = writeBatch(db);
-      const chunk = bookEntries.slice(i, i + BATCH_SIZE);
-      for (const [title, book] of chunk) {
-        const bookRef = doc(db, "users", userId, "books", title);
-        batch.set(bookRef, book);
-      }
-      await batch.commit();
-    }
-
-    // 4. Delete books that were removed locally but still exist in Firestore
-    const currentIds = new Set(Object.keys(library.books));
-    const idsToDelete = [...existingIds].filter(id => !currentIds.has(id));
-
-    for (let i = 0; i < idsToDelete.length; i += BATCH_SIZE) {
-      const batch = writeBatch(db);
-      idsToDelete.slice(i, i + BATCH_SIZE).forEach(id => {
-        batch.delete(doc(db!, "users", userId, "books", id));
-      });
-      await batch.commit();
-    }
-  } catch (error) {
-    console.error("Error syncing library:", error);
-    throw error;
-  }
+/**
+ * Save metadata (publishers & authors list) to Firestore.
+ */
+export const syncMeta = async (userId: string, publishers: string[], authors: string[]): Promise<void> => {
+  if (!db) throw new Error("Firestore not initialized");
+  const metaRef = doc(db, "users", userId, "meta", "info");
+  await setDoc(metaRef, { publishers, authors });
 };
 
 /**
  * Load the full library from Firestore subcollections.
+ * Falls back to legacy single-document format for backward compatibility.
  */
 export const loadLibraryFromFirestore = async (userId: string): Promise<LibraryState | null> => {
-  if (!db) {
-    console.warn("DB not initialized");
+  if (!db) return null;
+
+  // Load metadata and books in parallel for speed
+  const metaRef = doc(db, "users", userId, "meta", "info");
+  const booksCol = collection(db, "users", userId, "books");
+
+  const [metaSnap, booksSnap] = await Promise.all([
+    getDoc(metaRef),
+    getDocs(booksCol),
+  ]);
+
+  // No subcollection data → try legacy single-document format
+  if (!metaSnap.exists() && booksSnap.empty) {
+    const legacyRef = doc(db, "users", userId);
+    const legacySnap = await getDoc(legacyRef);
+    if (legacySnap.exists() && legacySnap.data().library) {
+      console.log("Loaded from legacy format. Will migrate on next save.");
+      return legacySnap.data().library as LibraryState;
+    }
     return null;
   }
-  try {
-    // Load metadata
-    const metaRef = doc(db, "users", userId, "meta", "info");
-    const metaSnap = await getDoc(metaRef);
 
-    // Load all books
-    const booksCol = collection(db, "users", userId, "books");
-    const booksSnap = await getDocs(booksCol);
+  const books: Record<string, Book> = {};
+  booksSnap.forEach(docSnap => {
+    // MIGRATION: legacy docs used the Arabic title as the doc ID and had no `id` field.
+    // Stamp id = docSnap.id so every Book always has a stable id going forward.
+    const raw = docSnap.data() as Omit<Book, 'id'> & { id?: string };
+    const book: Book = { ...raw, id: raw.id ?? docSnap.id };
+    books[book.id] = book;
+  });
 
-    if (!metaSnap.exists() && booksSnap.empty) {
-      // Try legacy format (old single-document approach) for backward compatibility
-      const legacyRef = doc(db, "users", userId);
-      const legacySnap = await getDoc(legacyRef);
-      if (legacySnap.exists() && legacySnap.data().library) {
-        console.log("Loaded from legacy single-document format. Will migrate on next sync.");
-        return legacySnap.data().library as LibraryState;
-      }
-      return null;
-    }
-
-    const books: Record<string, Book> = {};
-    booksSnap.forEach(docSnap => {
-      books[docSnap.id] = docSnap.data() as Book;
-    });
-
-    const meta = metaSnap.exists() ? metaSnap.data() : {};
-
-    return {
-      books,
-      publishers: meta.publishers ?? ['العتبة الحسينية المقدسة', 'دار المعارف', 'مؤسسة الأعلمي للمطبوعات'],
-      authors: meta.authors ?? ['آقا بزرگ الطهراني', 'الشيخ المفيد', 'الشريف المرتضى'],
-    };
-  } catch (error) {
-    console.error("Error loading library:", error);
-    throw error;
-  }
+  const meta = metaSnap.exists() ? metaSnap.data() : {};
+  return {
+    books,
+    publishers: meta.publishers ?? ['العتبة الحسينية المقدسة', 'دار المعارف', 'مؤسسة الأعلمي للمطبوعات'],
+    authors: meta.authors ?? ['آقا بزرگ الطهراني', 'الشيخ المفيد', 'الشريف المرتضى'],
+  };
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public Books
 // ─────────────────────────────────────────────────────────────────────────────
 
-export const publishBookToPublic = async (book: Book, userId: string) => {
-  if (!db) {
-    console.warn("DB not initialized");
-    return;
-  }
-  try {
-    const bookWithOwner = { ...book, ownerId: userId, status: 'published' as const };
-    const publicDocRef = doc(db, "public_books", book.title);
-    await setDoc(publicDocRef, bookWithOwner);
-  } catch (error) {
-    console.error("Error publishing book:", error);
-    throw error;
-  }
+export const publishBookToPublic = async (book: Book, userId: string): Promise<void> => {
+  if (!db) throw new Error("Firestore not initialized");
+  const bookWithOwner = { ...book, ownerId: userId, status: 'published' as const };
+  // Use book.id (UUID) as the public_books document ID — same pattern as private books.
+  await setDoc(doc(db, "public_books", book.id), bookWithOwner);
 };
 
-export const unpublishBookFromPublic = async (bookTitle: string) => {
-  if (!db) {
-    console.warn("DB not initialized");
-    return;
-  }
-  try {
-    const publicDocRef = doc(db, "public_books", bookTitle);
-    await deleteDoc(publicDocRef);
-  } catch (error) {
-    console.error("Error unpublishing book:", error);
-    throw error;
-  }
+export const unpublishBookFromPublic = async (bookId: string): Promise<void> => {
+  if (!db) throw new Error("Firestore not initialized");
+  await deleteDoc(doc(db, "public_books", bookId));
 };
 
 export const fetchPublicBooks = async (): Promise<Record<string, Book>> => {
-  if (!db) {
-    console.warn("DB not initialized");
-    return {};
-  }
+  if (!db) return {};
   try {
-    const publicBooksCol = collection(db, "public_books");
-    const bookSnapshot = await getDocs(publicBooksCol);
+    const snap = await getDocs(collection(db, "public_books"));
     const books: Record<string, Book> = {};
-    bookSnapshot.forEach((docSnap) => {
-      books[docSnap.id] = docSnap.data() as Book;
+    snap.forEach(d => {
+      const raw = d.data() as Omit<Book, 'id'> & { id?: string };
+      const book: Book = { ...raw, id: raw.id ?? d.id };
+      books[book.id] = book;
     });
     return books;
-  } catch (error) {
-    console.error("Error fetching public books:", error);
+  } catch {
     return {};
   }
 };

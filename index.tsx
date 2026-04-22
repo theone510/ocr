@@ -1,6 +1,9 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
+import { ToastProvider } from './components/Toast';
+import { ConfirmProvider } from './components/ConfirmModal';
+import { PdfStartPageProvider } from './components/PdfStartPageModal';
 
 const rootElement = document.getElementById('root');
 if (!rootElement) {
@@ -10,6 +13,12 @@ if (!rootElement) {
 const root = ReactDOM.createRoot(rootElement);
 root.render(
   <React.StrictMode>
-    <App />
+    <ToastProvider>
+      <ConfirmProvider>
+        <PdfStartPageProvider>
+          <App />
+        </PdfStartPageProvider>
+      </ConfirmProvider>
+    </ToastProvider>
   </React.StrictMode>
 );

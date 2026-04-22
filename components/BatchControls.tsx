@@ -2,7 +2,7 @@
 import React from 'react';
 import { Play, Pause, Loader2, CheckCircle2 } from 'lucide-react';
 import { Button } from './Button';
-import { toHindi } from '../App';
+import { toHindi } from '../utils/helpers';
 
 interface BatchControlsProps {
   totalPDFPages: number;

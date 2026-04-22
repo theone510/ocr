@@ -3,7 +3,7 @@ import React, { useState, useEffect } from 'react';
 import { LibraryIcon, Plus, ArrowLeft, Building2, User, Hash, BookCopy, Calendar, MapPin, FileDigit } from 'lucide-react';
 import { Button } from './Button';
 import { LibraryState } from '../types';
-import { toHindi } from '../App';
+import { toHindi } from '../utils/helpers';
 
 interface SessionSetupProps {
   library: LibraryState;
@@ -24,8 +24,9 @@ interface SessionSetupProps {
 }
 
 export const SessionSetup: React.FC<SessionSetupProps> = ({ library, onStartSession, onOpenLibrary, onAddPublisher, onAddAuthor }) => {
-  const books = Object.keys(library.books);
-  const hasBooks = books.length > 0;
+  // Get books as objects (id + title) — keys are now UUIDs, not titles
+  const bookList = Object.values(library.books);
+  const hasBooks = bookList.length > 0;
 
   const [mode, setMode] = useState<'select' | 'create'>(hasBooks ? 'select' : 'create');
   
@@ -41,8 +42,8 @@ export const SessionSetup: React.FC<SessionSetupProps> = ({ library, onStartSess
   const [isSeries, setIsSeries] = useState(false);
   const [volumeNumber, setVolumeNumber] = useState('');
   
-  // Select Mode States
-  const [selectedBook, setSelectedBook] = useState('');
+  // Select Mode States — store selected book id
+  const [selectedBookId, setSelectedBookId] = useState('');
   const [startPage, setStartPage] = useState<number>(1);
 
   // Default lists if empty
@@ -60,9 +61,9 @@ export const SessionSetup: React.FC<SessionSetupProps> = ({ library, onStartSess
     }
   }, [hasBooks, mode]);
 
-  const handleBookSelect = (title: string) => {
-    setSelectedBook(title);
-    const book = library.books[title];
+  const handleBookSelect = (bookId: string) => {
+    setSelectedBookId(bookId);
+    const book = library.books[bookId];
     if (book && book.pages.length > 0) {
       const maxPage = Math.max(...book.pages.map(p => p.pageNumber));
       setStartPage(maxPage + 1);
@@ -88,11 +89,11 @@ export const SessionSetup: React.FC<SessionSetupProps> = ({ library, onStartSess
   };
 
   const handleStart = () => {
-    if (mode === 'select' && hasBooks && selectedBook) {
-      // Use existing metadata
-      const book = library.books[selectedBook];
+    if (mode === 'select' && hasBooks && selectedBookId) {
+      // Use existing book by its UUID
+      const book = library.books[selectedBookId];
       onStartSession({
-        bookTitle: selectedBook,
+        bookTitle: book.title,   // pass human-readable title
         startPage: startPage,
         author: book.author || '',
         publisher: book.publisher || '',
@@ -120,7 +121,7 @@ export const SessionSetup: React.FC<SessionSetupProps> = ({ library, onStartSess
   const isCreateMode = mode === 'create' || !hasBooks;
   const isFormValid = isCreateMode 
     ? (newBookTitle && author && publisher) 
-    : (selectedBook);
+    : (selectedBookId);
 
   return (
     <div className="max-w-2xl mx-auto mt-6 p-8 bg-slate-900 rounded-3xl shadow-2xl border border-white/5 ring-1 ring-white/5">
@@ -315,12 +316,14 @@ export const SessionSetup: React.FC<SessionSetupProps> = ({ library, onStartSess
           <div>
             <label className="block text-xs font-bold text-slate-400 mb-1.5 uppercase tracking-wider">اختر الكتاب من المكتبة</label>
             <select
-              value={selectedBook}
+              value={selectedBookId}
               onChange={(e) => handleBookSelect(e.target.value)}
               className="w-full p-4 bg-slate-800 border border-slate-700 text-white rounded-xl focus:ring-1 focus:ring-[#c5a059] focus:border-[#c5a059] outline-none text-lg"
             >
               <option value="">-- اختر من القائمة --</option>
-              {books.map(b => <option key={b} value={b}>{toHindi(b)}</option>)}
+              {bookList.map(b => (
+                <option key={b.id} value={b.id}>{toHindi(b.title)}</option>
+              ))}
             </select>
           </div>
         )}

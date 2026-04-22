@@ -7,7 +7,7 @@ import {
   Eraser, AlignCenter, Bold
 } from 'lucide-react';
 import { Button } from './Button';
-import { toHindi } from '../App';
+import { toHindi } from '../utils/helpers';
 
 interface ResultDisplayProps {
   text: string | null;
