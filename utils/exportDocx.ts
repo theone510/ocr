@@ -61,7 +61,11 @@ function extractFootnotes(raw: string): {
     footnoteMap[docxId] = {
       children: [new Paragraph({
         alignment: AlignmentType.RIGHT,
-        children: [ar(content, { size: 20 })],
+        children: [
+          // U+200F Right-to-Left Mark: forces Word to treat this paragraph as RTL
+          new TextRun({ text: '\u200F', font: ARABIC_FONT, size: 20, rightToLeft: true }),
+          ar(content, { size: 20 }),
+        ],
       })],
     };
     return '';
