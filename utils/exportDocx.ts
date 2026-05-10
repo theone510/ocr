@@ -104,37 +104,42 @@ function buildRuns(
         usedCounts.set(ocrNum, count + 1);
         return [new FootnoteReferenceRun(ids[count % ids.length])];
       }
-      return [ar(part, opts)]; // unknown ref → plain text
+      return [ar(part, opts)];
     }
 
-    // Quranic verse — inline, green
-    const ayaMatch = part.match(/^<aya>([\s\S]*?)<\/aya>$/i);
-    if (ayaMatch) {
-      return [ar(ayaMatch[1].replace(/\n+/g, ' '), { size: opts.size ?? 24, color: '1A6B40' })];
+    // Quranic verse — green (recursive so nested bold etc. work)
+    const aya = part.match(/^<aya>([\s\S]*?)<\/aya>$/i);
+    if (aya) {
+      const inner = aya[1].replace(/\n+/g, ' ');
+      return buildRuns(inner, { size: opts.size ?? 24, color: '1A6B40' }, ocrToDocxIds, usedCounts);
     }
 
-    // Hadith — inline, blue
-    const hadithMatch = part.match(/^<hadith>([\s\S]*?)<\/hadith>$/i);
-    if (hadithMatch) {
-      return [ar(hadithMatch[1].replace(/\n+/g, ' '), { size: opts.size ?? 24, color: '1E5A9C' })];
+    // Hadith — blue (recursive)
+    const hadith = part.match(/^<hadith>([\s\S]*?)<\/hadith>$/i);
+    if (hadith) {
+      const inner = hadith[1].replace(/\n+/g, ' ');
+      return buildRuns(inner, { size: opts.size ?? 24, color: '1E5A9C' }, ocrToDocxIds, usedCounts);
     }
 
-    // Bold — inline
-    const boldMatch = part.match(/^<bold>([\s\S]*?)<\/bold>$/i);
-    if (boldMatch) {
-      return [ar(boldMatch[1].replace(/\n+/g, ' '), { ...opts, bold: true })];
+    // Bold — recursive so colour is inherited from parent
+    const bold = part.match(/^<bold>([\s\S]*?)<\/bold>$/i);
+    if (bold) {
+      const inner = bold[1].replace(/\n+/g, ' ');
+      return buildRuns(inner, { ...opts, bold: true }, ocrToDocxIds, usedCounts);
     }
 
-    // Headings appearing inline → render bold
-    const headingMatch = part.match(/^<h[1-3]>([\s\S]*?)<\/h[1-3]>$/i);
-    if (headingMatch) {
-      return [ar(headingMatch[1].replace(/\n+/g, ' '), { ...opts, bold: true })];
+    // Heading inline — bold (recursive)
+    const heading = part.match(/^<h[1-3]>([\s\S]*?)<\/h[1-3]>$/i);
+    if (heading) {
+      const inner = heading[1].replace(/\n+/g, ' ');
+      return buildRuns(inner, { ...opts, bold: true }, ocrToDocxIds, usedCounts);
     }
 
-    // Center / poetry appearing inline → render as-is
-    const blockMatch = part.match(/^<(?:center|poetry)>([\s\S]*?)<\/(?:center|poetry)>$/i);
-    if (blockMatch) {
-      return [ar(blockMatch[1].replace(/\n+/g, ' '), opts)];
+    // Center / poetry inline — inherit opts (recursive)
+    const block = part.match(/^<(?:center|poetry)>([\s\S]*?)<\/(?:center|poetry)>$/i);
+    if (block) {
+      const inner = block[1].replace(/\n+/g, ' ');
+      return buildRuns(inner, opts, ocrToDocxIds, usedCounts);
     }
 
     // Plain text
