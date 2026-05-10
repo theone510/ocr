@@ -1,14 +1,13 @@
 /**
  * exportDocx.ts — Arabic OCR → Word (.docx)
  *
- * FOOTNOTE STRATEGY (fixes duplicate-ID corruption):
- *  Pass 1 – scan for ALL <footnote>N: text</footnote> tags in order of
- *            appearance, assign each a globally unique sequential docx ID
- *            (1, 2, 3 …), strip them from the body text.
- *  Pass 2 – scan body text for [N] refs; each occurrence of [N] gets the
- *            NEXT unused docx ID that was mapped to OCR number N.
- *            This means two pages both having [1] produce two distinct
- *            footnote IDs (never the same), which Word accepts.
+ * INLINE vs BLOCK tags:
+ *  Block  (own paragraph): h1, h2, h3, center, poetry
+ *  Inline (styled TextRun): aya, hadith, bold   ← these stay inside their paragraph
+ *
+ * FOOTNOTE STRATEGY (no duplicate-ID corruption):
+ *  Pass 1 – collect <footnote>N: text</footnote> → globally sequential docx IDs
+ *  Pass 2 – [N] in body text → FootnoteReferenceRun with the correct unique ID
  */
 
 import {
@@ -23,11 +22,13 @@ const LATIN_FONT  = 'Arial';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 interface DocxOptions { bookTitle?: string; pageNumber?: number; }
-interface RunOpts { bold?: boolean; size?: number; color?: string; italics?: boolean; }
-type BlockType = 'h1'|'h2'|'h3'|'center'|'bold'|'aya'|'hadith'|'poetry'|'text';
+interface RunOpts    { bold?: boolean; size?: number; color?: string; italics?: boolean; }
+
+// Block-level types only (inline types are handled inside buildRuns)
+type BlockType = 'h1' | 'h2' | 'h3' | 'center' | 'poetry' | 'text';
 interface Block { type: BlockType; text: string; }
 
-// ── Helper: Arabic TextRun ────────────────────────────────────────────────────
+// ── Arabic TextRun helper ─────────────────────────────────────────────────────
 function ar(text: string, o: RunOpts = {}): TextRun {
   return new TextRun({
     text, bold: o.bold, italics: o.italics,
@@ -39,7 +40,7 @@ function ar(text: string, o: RunOpts = {}): TextRun {
 // ── Pass 1: extract footnotes, assign globally-unique sequential IDs ──────────
 function extractFootnotes(raw: string): {
   footnoteMap: Record<number, { children: Paragraph[] }>;
-  ocrToDocxIds: Map<number, number[]>; // ocrNum → [docxId, docxId, …]
+  ocrToDocxIds: Map<number, number[]>;
   cleanedText: string;
 } {
   const footnoteMap: Record<number, { children: Paragraph[] }> = {};
@@ -69,47 +70,96 @@ function extractFootnotes(raw: string): {
   return { footnoteMap, ocrToDocxIds, cleanedText };
 }
 
-// ── Pass 2: build runs, mapping each [N] occurrence to its unique docxId ──────
+// ── Pass 2: build runs — handles INLINE tags + footnote refs ─────────────────
+/**
+ * Splits a text string on inline tokens:
+ *   <aya>…</aya>    → green TextRun  (inline Quranic verse)
+ *   <hadith>…</hadith> → blue TextRun (inline hadith)
+ *   <bold>…</bold>  → bold TextRun   (inline bold)
+ *   [N]             → FootnoteReferenceRun with unique docx ID
+ * Everything else → plain Arabic TextRun with the given opts.
+ */
 function buildRuns(
   text: string,
   opts: RunOpts,
   ocrToDocxIds: Map<number, number[]>,
-  usedCounts: Map<number, number>,        // mutated: tracks how many [N] we've seen
+  usedCounts: Map<number, number>,
 ): (TextRun | FootnoteReferenceRun)[] {
-  return text.split(/(\[\d+\])/g).flatMap((part): (TextRun | FootnoteReferenceRun)[] => {
+  // Capture delimiter: any inline tag or [N]
+  const INLINE = /(<aya>[\s\S]*?<\/aya>|<hadith>[\s\S]*?<\/hadith>|<bold>[\s\S]*?<\/bold>|\[\d+\])/gi;
+
+  return text.split(INLINE).flatMap((part): (TextRun | FootnoteReferenceRun)[] => {
     if (!part) return [];
-    const m = part.match(/^\[(\d+)\]$/);
-    if (m) {
-      const ocrNum = parseInt(m[1], 10);
+
+    // Footnote reference [N]
+    const fnRef = part.match(/^\[(\d+)\]$/);
+    if (fnRef) {
+      const ocrNum = parseInt(fnRef[1], 10);
       const ids = ocrToDocxIds.get(ocrNum);
       if (ids && ids.length > 0) {
         const count = usedCounts.get(ocrNum) ?? 0;
-        const docxId = ids[count % ids.length]; // cycle safely
         usedCounts.set(ocrNum, count + 1);
-        return [new FootnoteReferenceRun(docxId)];
+        return [new FootnoteReferenceRun(ids[count % ids.length])];
       }
+      return [ar(part, opts)]; // unknown ref → plain text
     }
+
+    // Quranic verse — inline, green
+    const ayaMatch = part.match(/^<aya>([\s\S]*?)<\/aya>$/i);
+    if (ayaMatch) {
+      return [ar(ayaMatch[1].replace(/\n+/g, ' '), { size: opts.size ?? 24, color: '1A6B40' })];
+    }
+
+    // Hadith — inline, blue
+    const hadithMatch = part.match(/^<hadith>([\s\S]*?)<\/hadith>$/i);
+    if (hadithMatch) {
+      return [ar(hadithMatch[1].replace(/\n+/g, ' '), { size: opts.size ?? 24, color: '1E5A9C' })];
+    }
+
+    // Bold — inline
+    const boldMatch = part.match(/^<bold>([\s\S]*?)<\/bold>$/i);
+    if (boldMatch) {
+      return [ar(boldMatch[1].replace(/\n+/g, ' '), { ...opts, bold: true })];
+    }
+
+    // Plain text
     return [ar(part, opts)];
   });
 }
 
-// ── Parse body blocks ─────────────────────────────────────────────────────────
+// ── Parse body into block-level segments ──────────────────────────────────────
+/**
+ * Only BLOCK-level tags become separate paragraphs.
+ * Inline tags (aya, hadith, bold) remain embedded in their surrounding text.
+ */
 function parseBlocks(text: string): Block[] {
   const blocks: Block[] = [];
-  const TAG = /<(h1|h2|h3|center|bold|aya|hadith|poetry)>([\s\S]*?)<\/\1>/gi;
-  let last = 0, m: RegExpExecArray | null;
+  // Only true block-level tags
+  const TAG = /<(h1|h2|h3|center|poetry)>([\s\S]*?)<\/\1>/gi;
+  let last = 0;
+  let m: RegExpExecArray | null;
 
   while ((m = TAG.exec(text)) !== null) {
-    text.slice(last, m.index).trim().split(/\n/).forEach(l => {
-      const t = l.trim(); if (t) blocks.push({ type: 'text', text: t });
+    // Text (possibly containing inline tags) before this block tag
+    const before = text.slice(last, m.index);
+    before.split(/\n/).forEach(l => {
+      const t = l.trim();
+      if (t) blocks.push({ type: 'text', text: t });
     });
+
+    const tag     = m[1].toLowerCase() as BlockType;
     const content = m[2].replace(/\n+/g, ' ').trim();
-    if (content) blocks.push({ type: m[1].toLowerCase() as BlockType, text: content });
+    if (content) blocks.push({ type: tag, text: content });
+
     last = TAG.lastIndex;
   }
-  text.slice(last).trim().split(/\n/).forEach(l => {
-    const t = l.trim(); if (t) blocks.push({ type: 'text', text: t });
+
+  // Trailing text
+  text.slice(last).split(/\n/).forEach(l => {
+    const t = l.trim();
+    if (t) blocks.push({ type: 'text', text: t });
   });
+
   return blocks;
 }
 
@@ -119,7 +169,7 @@ function toParagraph(
   ocrToDocxIds: Map<number, number[]>,
   usedCounts: Map<number, number>,
 ): Paragraph {
-  const runs = (opts: RunOpts) => buildRuns(block.text, opts, ocrToDocxIds, usedCounts);
+  const runs = (o: RunOpts) => buildRuns(block.text, o, ocrToDocxIds, usedCounts);
 
   switch (block.type) {
     case 'h1': return new Paragraph({
@@ -153,30 +203,14 @@ function toParagraph(
       shading: { type: ShadingType.CLEAR, fill: 'F5F5F0', color: 'auto' },
       children: runs({ italics: true, size: 26 }),
     });
-    case 'aya': return new Paragraph({
-      alignment: AlignmentType.RIGHT, spacing: { before: 80, after: 80, line: 380 },
-      shading: { type: ShadingType.CLEAR, fill: 'E8F8F0', color: 'auto' },
-      border: { right: { style: BorderStyle.SINGLE, size: 8, color: '2E8B57', space: 6 } },
-      children: runs({ size: 24, color: '1A6B40' }),
-    });
-    case 'hadith': return new Paragraph({
-      alignment: AlignmentType.RIGHT, spacing: { before: 80, after: 80, line: 380 },
-      shading: { type: ShadingType.CLEAR, fill: 'EEF4FB', color: 'auto' },
-      border: { right: { style: BorderStyle.SINGLE, size: 8, color: '1E5A9C', space: 6 } },
-      children: runs({ size: 24, color: '1E5A9C' }),
-    });
-    case 'bold': return new Paragraph({
-      alignment: AlignmentType.JUSTIFIED, spacing: { before: 80, after: 80, line: 360 },
-      children: runs({ bold: true, size: 24 }),
-    });
-    default: return new Paragraph({
+    default: return new Paragraph({  // 'text' — may contain inline aya/hadith/bold
       alignment: AlignmentType.JUSTIFIED, spacing: { before: 80, after: 80, line: 360 },
       children: runs({ size: 24 }),
     });
   }
 }
 
-// ── Main ──────────────────────────────────────────────────────────────────────
+// ── Main export ───────────────────────────────────────────────────────────────
 export async function buildDocxBlob(ocrText: string, options: DocxOptions = {}): Promise<Blob> {
   const { bookTitle = 'نتيجة التعرف الضوئي', pageNumber } = options;
 
@@ -185,12 +219,12 @@ export async function buildDocxBlob(ocrText: string, options: DocxOptions = {}):
     '0123456789'['٠١٢٣٤٥٦٧٨٩'.indexOf(d)]
   );
 
-  // Pass 1 — extract footnotes
+  // Pass 1 — extract real Word footnotes
   const { footnoteMap, ocrToDocxIds, cleanedText } = extractFootnotes(normalised);
 
-  // Pass 2 — parse blocks; usedCounts is shared across all blocks
+  // Pass 2 — parse blocks; usedCounts is shared so each [N] gets its unique ID
   const usedCounts = new Map<number, number>();
-  const children = parseBlocks(cleanedText).map(b => toParagraph(b, ocrToDocxIds, usedCounts));
+  const children   = parseBlocks(cleanedText).map(b => toParagraph(b, ocrToDocxIds, usedCounts));
 
   const docTitle = `${bookTitle}${pageNumber !== undefined ? ` - صفحة ${pageNumber}` : ''}`;
 
@@ -198,7 +232,10 @@ export async function buildDocxBlob(ocrText: string, options: DocxOptions = {}):
     footnotes: footnoteMap,
     styles: {
       default: {
-        document: { run: { font: ARABIC_FONT, size: 24, rightToLeft: true }, paragraph: { alignment: AlignmentType.RIGHT } },
+        document: {
+          run:       { font: ARABIC_FONT, size: 24, rightToLeft: true },
+          paragraph: { alignment: AlignmentType.RIGHT },
+        },
       },
       paragraphStyles: [
         { id: 'Heading1', name: 'Heading 1', basedOn: 'Normal', next: 'Normal', quickFormat: true,
@@ -241,7 +278,7 @@ export async function downloadAsDocx(ocrText: string, options: DocxOptions = {})
   const url  = URL.createObjectURL(blob);
   const safe = (options.bookTitle ?? 'ocr').replace(/\s+/g, '_').replace(/[^\w\u0600-\u06FF_-]/g, '');
   const page = options.pageNumber !== undefined ? `_p${options.pageNumber}` : '';
-  const a = document.createElement('a');
+  const a    = document.createElement('a');
   a.href = url; a.download = `${safe}${page}.docx`; a.click();
   URL.revokeObjectURL(url);
 }
