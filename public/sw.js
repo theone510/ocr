@@ -1,6 +1,6 @@
 
-// ── v2: fixes Firestore/Gemini passthrough ────────────────────────────────
-const CACHE_NAME = 'manuscript-archive-v2';
+// ── v3: broader passthrough + safe fallback Response ─────────────────────
+const CACHE_NAME = 'manuscript-archive-v3';
 const urlsToCache = [
   '/',
   '/index.html',
@@ -8,7 +8,6 @@ const urlsToCache = [
 ];
 
 self.addEventListener('install', (event) => {
-  // skipWaiting: activate this SW immediately without waiting for old tabs to close
   self.skipWaiting();
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => cache.addAll(urlsToCache))
@@ -18,30 +17,22 @@ self.addEventListener('install', (event) => {
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
 
-  // Never intercept external API calls — let them go directly to the network
-  const passthroughHosts = [
-    'firestore.googleapis.com',
-    'generativelanguage.googleapis.com',
-    'identitytoolkit.googleapis.com',
-    'securetoken.googleapis.com',
-    'firebase.googleapis.com',
-    'firebaseapp.com',
-    'googleapis.com',
-    'fonts.googleapis.com',
-    'fonts.gstatic.com',
-    'esm.sh',
-    'cdnjs.cloudflare.com',
-    'flaticon.com',
-    'iquc.org',
-  ];
-
-  if (passthroughHosts.some(host => url.hostname.includes(host))) {
-    return; // Do NOT call event.respondWith — browser handles it natively
+  // Pass ALL cross-origin requests straight through — never intercept them.
+  // This covers: Firebase, Gemini, Google Auth, Google tracking pixels,
+  // CDN assets, fonts, PDF.js worker, and any other external resource.
+  if (url.origin !== self.location.origin) {
+    return; // Do NOT call event.respondWith — browser handles natively
   }
 
-  // Local app assets: network first, cache fallback
+  // Same-origin app assets: network-first, then cache, then empty 404.
+  // Always return a valid Response so the browser never crashes.
   event.respondWith(
-    fetch(event.request).catch(() => caches.match(event.request))
+    fetch(event.request)
+      .catch(() =>
+        caches.match(event.request).then(
+          (cached) => cached || new Response('', { status: 404, statusText: 'Not Found' })
+        )
+      )
   );
 });
 

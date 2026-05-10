@@ -837,7 +837,7 @@ const App: React.FC = () => {
                   } catch (err: any) {
                     toast.error('فشل تسجيل الدخول: ' + (err.message || 'خطأ غير معروف'));
                   }
-                }} className="text-[#c5a059] hover:bg-[#c5a059]/10 bg-slate-800 border border-[#c5a059]/20">
+                }} className="text-[#c5a059] hover:bg-[#c5a059]/10 bg-slate-800 border border-[#c5a059]/20" data-testid="google-login-btn">
                   <User size={16} className="ml-2 hidden sm:block"/> دخول سحابي
                 </Button>
               )}

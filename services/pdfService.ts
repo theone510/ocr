@@ -1,14 +1,14 @@
 
 import * as pdfjsLib from 'pdfjs-dist';
+// Import the worker as a bundled local asset (no CDN needed — works offline)
+import PdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.js?url';
 
 // Handle potential default export structure from CDN/esm.sh
 const pdfjs = (pdfjsLib as any).default || pdfjsLib;
 
-// DYNAMIC VERSION FIX:
-// Instead of hardcoding the version, we read it from the loaded library.
-// This guarantees the Main Thread and Worker Thread versions always match.
+// Use the locally bundled worker — never fetches from an external CDN
 if (pdfjs.GlobalWorkerOptions) {
-  pdfjs.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.js`;
+  pdfjs.GlobalWorkerOptions.workerSrc = PdfWorkerUrl;
 }
 
 export interface PDFDocumentProxy {
@@ -19,15 +19,15 @@ export interface PDFDocumentProxy {
 export const loadPDF = async (file: File): Promise<PDFDocumentProxy> => {
   try {
     const arrayBuffer = await file.arrayBuffer();
-    
-    // Configure with CMaps for better Arabic text support during rendering
-    const loadingTask = pdfjs.getDocument({ 
+
+    // Use locally bundled cmaps and fonts — no CDN required
+    const loadingTask = pdfjs.getDocument({
       data: arrayBuffer,
-      cMapUrl: `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/cmaps/`,
+      cMapUrl: '/node_modules/pdfjs-dist/cmaps/',
       cMapPacked: true,
-      standardFontDataUrl: `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/standard_fonts/`
+      standardFontDataUrl: '/node_modules/pdfjs-dist/standard_fonts/'
     });
-    
+
     return loadingTask.promise;
   } catch (error) {
     console.error("Error loading PDF:", error);
