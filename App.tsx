@@ -42,13 +42,13 @@ const App: React.FC = () => {
       const saved = localStorage.getItem(STORAGE_KEY);
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (!parsed.publishers) parsed.publishers = ['العتبة الحسينية المقدسة', 'دار المعارف', 'مؤسسة الأعلمي للمطبوعات'];
+        if (!parsed.publishers) parsed.publishers = ['دار المعارف', 'مؤسسة الأعلمي للمطبوعات'];
         if (!parsed.authors) parsed.authors = ['آقا بزرگ الطهراني', 'الشيخ المفيد', 'الشريف المرتضى'];
         return parsed;
       }
       return {
         books: {},
-        publishers: ['العتبة الحسينية المقدسة', 'دار المعارف', 'مؤسسة الأعلمي للمطبوعات'],
+        publishers: ['دار المعارف', 'مؤسسة الأعلمي للمطبوعات'],
         authors: ['آقا بزرگ الطهراني', 'الشيخ المفيد', 'الشريف المرتضى']
       };
     } catch (e) {
@@ -717,11 +717,8 @@ const App: React.FC = () => {
                  <ScrollText size={64} strokeWidth={1} />
               </div>
               <h1 className="text-4xl md:text-6xl font-manuscript font-bold text-transparent bg-clip-text bg-gradient-to-b from-[#c5a059] to-[#8a6d32] leading-tight drop-shadow-sm mb-4">
-                 وحدة تنمية المقتنيات
+                 نظام الأرشفة الرقمي
               </h1>
-              <p className="text-slate-400 text-lg md:text-xl font-light tracking-wide">
-                 العتبة الحسينية المقدسة
-              </p>
            </div>
 
            <div className="bg-slate-900/50 backdrop-blur-xl p-8 rounded-3xl border border-white/10 w-full max-w-md shadow-2xl ring-1 ring-black/50">
@@ -764,7 +761,7 @@ const App: React.FC = () => {
                 <ScrollText size={24} />
               </div>
               <div>
-                <h1 className="text-xl font-bold tracking-tight text-white leading-tight">وحدة تنمية المقتنيات</h1>
+                <h1 className="text-xl font-bold tracking-tight text-white leading-tight">نظام الأرشفة الرقمي</h1>
                 <p className="text-[10px] text-[#c5a059] font-medium opacity-90 tracking-wider">PLATINUM EDITION v4.0</p>
               </div>
             </div>

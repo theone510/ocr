@@ -143,7 +143,7 @@ export const loadLibraryFromFirestore = async (userId: string): Promise<LibraryS
   const meta = metaSnap.exists() ? metaSnap.data() : {};
   return {
     books,
-    publishers: meta.publishers ?? ['العتبة الحسينية المقدسة', 'دار المعارف', 'مؤسسة الأعلمي للمطبوعات'],
+    publishers: meta.publishers ?? ['دار المعارف', 'مؤسسة الأعلمي للمطبوعات'],
     authors: meta.authors ?? ['آقا بزرگ الطهراني', 'الشيخ المفيد', 'الشريف المرتضى'],
   };
 };

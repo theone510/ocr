@@ -49,7 +49,7 @@ export const SessionSetup: React.FC<SessionSetupProps> = ({ library, onStartSess
   // Default lists if empty
   const availablePublishers = library.publishers && library.publishers.length > 0 
     ? library.publishers 
-    : ['العتبة الحسينية المقدسة', 'دار المعارف', 'مؤسسة الأعلمي للمطبوعات'];
+    : ['دار المعارف', 'مؤسسة الأعلمي للمطبوعات'];
     
   const availableAuthors = library.authors && library.authors.length > 0
     ? library.authors
