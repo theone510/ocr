@@ -17,7 +17,10 @@ import {
   Upload,
   Search,
   FileCode,
+  FileDown,
+  Loader2,
 } from 'lucide-react';
+import { downloadAsDocx } from '../utils/exportDocx';
 
 interface LibraryViewProps {
   library: LibraryState;
@@ -47,6 +50,7 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
   const { confirm } = useConfirm();
   const [searchTerm, setSearchTerm] = useState('');
   const [downloadMenuOpen, setDownloadMenuOpen] = useState<string | null>(null);
+  const [exportingDocxId, setExportingDocxId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // FIX: Cast Object.values to Book[] to prevent 'unknown' type errors
@@ -273,6 +277,23 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
     setDownloadMenuOpen(null);
   };
 
+  const downloadDocx = async (book: Book) => {
+    if (exportingDocxId) return;
+    setDownloadMenuOpen(null);
+    setExportingDocxId(book.id);
+    try {
+      const sortedPages = [...book.pages].sort((a, b) => a.pageNumber - b.pageNumber);
+      const fullText = sortedPages
+        .map(page => `<h2>صفحة ${page.pageNumber}</h2>\n${page.text}`)
+        .join('\n');
+      await downloadAsDocx(fullText, { bookTitle: book.title });
+    } catch (err) {
+      console.error('DOCX export failed', err);
+    } finally {
+      setExportingDocxId(null);
+    }
+  };
+
   return (
     <div className="space-y-6 animate-in fade-in duration-500 relative">
       {/* Backdrop for menu */}
@@ -334,11 +355,26 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
                                    <span className="text-[10px] text-slate-500">بنفس تنسيق العرض</span>
                                 </div>
                              </button>
-                             <button onClick={() => downloadText(book)} className="w-full flex items-center gap-3 px-4 py-3 text-sm text-slate-200 hover:bg-slate-800 hover:text-[#c5a059] transition-colors text-right">
+                             <button onClick={() => downloadText(book)} className="w-full flex items-center gap-3 px-4 py-3 text-sm text-slate-200 hover:bg-slate-800 hover:text-[#c5a059] transition-colors text-right border-b border-white/5">
                                 <div className="p-1.5 bg-blue-500/10 rounded text-blue-500"><FileText size={16}/></div>
                                 <div className="flex flex-col items-start">
                                    <span className="font-bold">نسخة نصية</span>
                                    <span className="text-[10px] text-slate-500">بدون وسوم (TXT)</span>
+                                </div>
+                             </button>
+                             <button
+                               onClick={() => downloadDocx(book)}
+                               disabled={exportingDocxId === book.id}
+                               className="w-full flex items-center gap-3 px-4 py-3 text-sm text-slate-200 hover:bg-slate-800 hover:text-emerald-400 transition-colors text-right disabled:opacity-50"
+                             >
+                                <div className="p-1.5 bg-emerald-500/10 rounded text-emerald-500">
+                                  {exportingDocxId === book.id
+                                    ? <Loader2 size={16} className="animate-spin" />
+                                    : <FileDown size={16} />}
+                                </div>
+                                <div className="flex flex-col items-start">
+                                   <span className="font-bold">نسخة Word</span>
+                                   <span className="text-[10px] text-slate-500">مُنسَّقة بالكامل (DOCX)</span>
                                 </div>
                              </button>
                           </div>

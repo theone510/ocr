@@ -4,10 +4,11 @@ import {
   Copy, Check, FileText, Pencil, Save, X, 
   Music, MessageSquarePlus,
   Heading1, Heading2, Heading3, Heading4, Heading5, Sparkles, Quote,
-  Eraser, AlignCenter, Bold
+  Eraser, AlignCenter, Bold, FileDown, Loader2
 } from 'lucide-react';
 import { Button } from './Button';
 import { toHindi } from '../utils/helpers';
+import { downloadAsDocx } from '../utils/exportDocx';
 
 interface ResultDisplayProps {
   text: string | null;
@@ -33,6 +34,7 @@ export const ResultDisplay: React.FC<ResultDisplayProps> = ({
   const [copied, setCopied] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [localText, setLocalText] = useState(text || '');
+  const [isExporting, setIsExporting] = useState(false);
   const editorRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -130,6 +132,18 @@ export const ResultDisplay: React.FC<ResultDisplayProps> = ({
       setTimeout(() => setCopied(false), 2000);
     } catch (err) {
       console.error('Failed to copy text', err);
+    }
+  };
+
+  const handleDownloadDocx = async () => {
+    if (!localText || isExporting) return;
+    setIsExporting(true);
+    try {
+      await downloadAsDocx(localText, { bookTitle, pageNumber });
+    } catch (err) {
+      console.error('Failed to export DOCX', err);
+    } finally {
+      setIsExporting(false);
     }
   };
 
@@ -356,6 +370,19 @@ export const ResultDisplay: React.FC<ResultDisplayProps> = ({
               <Button variant="ghost" size="sm" onClick={() => setIsEditing(true)} className="font-bold text-[#c5a059] hover:bg-[#c5a059]/10"><Pencil className="w-4 h-4 ml-2" /> تعديل</Button>
               <Button variant="outline" size="sm" onClick={handleCopy} className="border-slate-700 text-slate-400 hover:text-white hover:border-white">
                 {copied ? <Check size={16} /> : <Copy size={16} />}
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleDownloadDocx}
+                disabled={isExporting || !localText}
+                className="border-slate-700 text-emerald-400 hover:text-emerald-300 hover:border-emerald-500 disabled:opacity-50 gap-1.5 font-bold"
+                title="تنزيل كملف Word"
+              >
+                {isExporting
+                  ? <Loader2 size={15} className="animate-spin" />
+                  : <FileDown size={15} />}
+                <span className="text-xs hidden sm:inline">Word</span>
               </Button>
             </>
           )}
