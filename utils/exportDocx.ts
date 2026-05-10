@@ -61,11 +61,9 @@ function extractFootnotes(raw: string): {
     footnoteMap[docxId] = {
       children: [new Paragraph({
         alignment: AlignmentType.RIGHT,
-        children: [
-          // U+200F Right-to-Left Mark: forces Word to treat this paragraph as RTL
-          new TextRun({ text: '\u200F', font: ARABIC_FONT, size: 20, rightToLeft: true }),
-          ar(content, { size: 20 }),
-        ],
+        bidirectional: true,
+        // Use buildRuns so inline tags inside footnotes (aya, hadith, bold) are styled
+        children: buildRuns(content, { size: 20 }, ocrToDocxIds, new Map()),
       })],
     };
     return '';
