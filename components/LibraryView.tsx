@@ -284,7 +284,7 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
     try {
       const sortedPages = [...book.pages].sort((a, b) => a.pageNumber - b.pageNumber);
       const fullText = sortedPages
-        .map(page => `<h2>صفحة ${page.pageNumber}</h2>\n${page.text}`)
+        .map(page => page.text)
         .join('\n');
       await downloadAsDocx(fullText, { bookTitle: book.title });
     } catch (err) {
