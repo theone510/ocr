@@ -88,7 +88,8 @@ function buildRuns(
   usedCounts: Map<number, number>,
 ): (TextRun | FootnoteReferenceRun)[] {
   // Capture delimiter: any inline tag or [N]
-  const INLINE = /(<aya>[\s\S]*?<\/aya>|<hadith>[\s\S]*?<\/hadith>|<bold>[\s\S]*?<\/bold>|\[\d+\])/gi;
+  const INLINE =
+    /(<aya>[\s\S]*?<\/aya>|<hadith>[\s\S]*?<\/hadith>|<bold>[\s\S]*?<\/bold>|<h[1-3]>[\s\S]*?<\/h[1-3]>|<center>[\s\S]*?<\/center>|<poetry>[\s\S]*?<\/poetry>|\[\d+\])/gi;
 
   return text.split(INLINE).flatMap((part): (TextRun | FootnoteReferenceRun)[] => {
     if (!part) return [];
@@ -122,6 +123,18 @@ function buildRuns(
     const boldMatch = part.match(/^<bold>([\s\S]*?)<\/bold>$/i);
     if (boldMatch) {
       return [ar(boldMatch[1].replace(/\n+/g, ' '), { ...opts, bold: true })];
+    }
+
+    // Headings appearing inline → render bold
+    const headingMatch = part.match(/^<h[1-3]>([\s\S]*?)<\/h[1-3]>$/i);
+    if (headingMatch) {
+      return [ar(headingMatch[1].replace(/\n+/g, ' '), { ...opts, bold: true })];
+    }
+
+    // Center / poetry appearing inline → render as-is
+    const blockMatch = part.match(/^<(?:center|poetry)>([\s\S]*?)<\/(?:center|poetry)>$/i);
+    if (blockMatch) {
+      return [ar(blockMatch[1].replace(/\n+/g, ' '), opts)];
     }
 
     // Plain text
