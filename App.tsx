@@ -1,5 +1,6 @@
 
 import React, { useState, useEffect, useRef } from 'react';
+import { Routes, Route, useNavigate, useLocation, useParams } from 'react-router-dom';
 import { PageData, Book, LibraryState, UploadedImage, LoadingState } from './types';
 import { analyzeManuscript } from './services/geminiService';
 import { auth, loginWithGoogle, logoutUser, syncSingleBook, deleteSingleBook, syncMeta, loadLibraryFromFirestore, fetchPublicBooks, publishBookToPublic, unpublishBookFromPublic } from './services/firebaseService';
@@ -36,7 +37,20 @@ const App: React.FC = () => {
   const { confirm } = useConfirm();
   const { promptPdfStartPage } = usePdfStartPage();
 
-  const [showLanding, setShowLanding] = useState(true);
+  const navigate = useNavigate();
+  const location = useLocation();
+
+  // Derive current view from URL path
+  const currentPath = location.pathname;
+  const isLanding = currentPath === '/';
+  const isSetup = currentPath === '/setup';
+  const isWorkspace = currentPath === '/workspace';
+  const isLibrary = currentPath === '/library';
+  const isViewer = currentPath.startsWith('/viewer/');
+
+  // Derive view string for backward-compatible logic
+  const view = isViewer ? 'full-viewer' : isLibrary ? 'library' : isWorkspace ? 'workspace' : isSetup ? 'setup' : 'landing';
+
   const [library, setLibrary] = useState<LibraryState>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
@@ -57,9 +71,6 @@ const App: React.FC = () => {
   });
 
   const [activeSession, setActiveSession] = useState<{bookId: string, bookTitle: string, currentPage: number} | null>(null);
-  const [view, setView] = useState<'setup' | 'workspace' | 'library' | 'full-viewer'>('setup');
-  const [viewerMode, setViewerMode] = useState<'read' | 'edit'>('read');
-  const [viewingBookId, setViewingBookId] = useState<string | null>(null);
   const [currentImage, setCurrentImage] = useState<UploadedImage | null>(null);
   const [loadingState, setLoadingState] = useState<LoadingState>(LoadingState.IDLE);
   const [error, setError] = useState<string | null>(null);
@@ -321,7 +332,7 @@ const App: React.FC = () => {
       setActiveSession({ bookId: existingBook.id, bookTitle: existingBook.title, currentPage: data.startPage });
     }
 
-    setView('workspace');
+    navigate('/workspace');
     setLastProcessedPageId(null);
     setCurrentImage(null);
     setLoadingState(LoadingState.IDLE);
@@ -333,7 +344,7 @@ const App: React.FC = () => {
 
   const handleEndSession = () => {
     setActiveSession(null);
-    setView('setup');
+    navigate('/setup');
     setPdfDoc(null);
     setBatchStatus('idle');
     setCurrentImage(null);
@@ -702,7 +713,7 @@ const App: React.FC = () => {
     ? library.books[activeSession.bookId]?.pages.find(p => p.id === lastProcessedPageId) || null
     : null;
 
-  if (showLanding) {
+  if (isLanding) {
     return (
       <div className="fixed inset-0 z-[100] bg-slate-950 flex items-center justify-center p-4 overflow-hidden font-sans" dir="rtl">
          {/* Premium Radial Background */}
@@ -727,7 +738,7 @@ const App: React.FC = () => {
              </p>
              <div className="flex flex-col gap-3">
                <button
-                 onClick={() => setShowLanding(false)}
+                 onClick={() => navigate('/setup')}
                  className="group w-full py-4 bg-gradient-to-r from-[#c5a059] to-[#9f7d3d] text-slate-900 font-bold text-xl rounded-xl shadow-[0_0_20px_rgba(197,160,89,0.2)] hover:shadow-[0_0_30px_rgba(197,160,89,0.4)] hover:scale-[1.02] transition-all duration-300 active:scale-95 flex items-center justify-center gap-3"
                >
                  <span>نظام الأرشفة</span>
@@ -735,7 +746,7 @@ const App: React.FC = () => {
                </button>
 
                <button
-                 onClick={() => { setShowLanding(false); setView('library'); }}
+                 onClick={() => navigate('/library')}
                  className="group w-full py-3 bg-slate-800 text-[#c5a059] font-bold text-lg rounded-xl border border-[#c5a059]/20 hover:bg-[#c5a059]/10 hover:border-[#c5a059]/50 transition-all duration-300 active:scale-95 flex items-center justify-center gap-3"
                >
                  <span>المكتبة الرقمية</span>
@@ -755,7 +766,7 @@ const App: React.FC = () => {
           <div className={`mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between transition-all duration-300 ${view === 'workspace' ? 'w-full' : 'max-w-7xl'}`}>
             <div
               className="flex items-center gap-3 cursor-pointer hover:opacity-80 transition-opacity"
-              onClick={() => setView('setup')}
+              onClick={() => navigate('/setup')}
             >
               <div className="p-2 bg-gradient-to-br from-[#c5a059] to-[#8a6d32] rounded-lg text-slate-900 shadow-md">
                 <ScrollText size={24} />
@@ -784,11 +795,11 @@ const App: React.FC = () => {
                   <LogOut size={16} className="ml-2" />إنهاء الجلسة
                 </Button>
               ) : view === 'library' ? (
-                <Button variant="ghost" size="sm" onClick={() => setView('setup')} className="text-slate-400 hover:text-white">
+                <Button variant="ghost" size="sm" onClick={() => navigate('/setup')} className="text-slate-400 hover:text-white">
                   <ArrowRight size={16} className="ml-2" />عودة للرئيسية
                 </Button>
               ) : view === 'setup' ? (
-                <Button variant="ghost" size="sm" onClick={() => setView('library')} className="text-[#c5a059] hover:bg-[#c5a059]/10 border border-[#c5a059]/20">
+                <Button variant="ghost" size="sm" onClick={() => navigate('/library')} className="text-[#c5a059] hover:bg-[#c5a059]/10 border border-[#c5a059]/20">
                   <BookCopy size={16} className="ml-2" /> المكتبة الرقمية
                 </Button>
               ) : null}
@@ -844,113 +855,148 @@ const App: React.FC = () => {
       )}
 
       <main className={`transition-all duration-300 ${view === 'full-viewer' ? '' : view === 'workspace' ? 'w-full px-4 sm:px-6 py-4' : 'max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 lg:py-12'}`}>
-        {view === 'setup' && (
-          <SessionSetup
-            library={library}
-            onStartSession={handleStartSession}
-            onOpenLibrary={() => setView('library')}
-            onAddPublisher={handleAddPublisher}
-            onAddAuthor={handleAddAuthor}
-          />
-        )}
+        <Routes>
+          <Route path="/setup" element={
+            <SessionSetup
+              library={library}
+              onStartSession={handleStartSession}
+              onOpenLibrary={() => navigate('/library')}
+              onAddPublisher={handleAddPublisher}
+              onAddAuthor={handleAddAuthor}
+            />
+          } />
 
-        {view === 'workspace' && activeSession && (
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 lg:gap-6 lg:h-[calc(100vh-6rem)]">
-            <section className="flex flex-col gap-4 h-full order-1 lg:order-1 min-h-[500px] lg:min-h-0">
-
-              {/* Batch Controls (Only Visible when PDF is loaded) */}
-              {pdfDoc && batchStatus !== 'idle' && (
-                <BatchControls
-                  totalPDFPages={pdfDoc.numPages}
-                  currentPDFPage={currentPdfPageIdx}
-                  isProcessing={batchStatus === 'running'}
-                  isPaused={batchStatus === 'paused'}
-                  onPause={pauseBatch}
-                  onResume={resumeBatch}
-                  fileName={pdfFileName}
-                />
-              )}
-
-              <div className="bg-slate-900 p-4 rounded-2xl shadow-2xl border border-white/5 flex-1 flex flex-col relative overflow-hidden">
-                <div className="flex items-center justify-between mb-3 z-10">
-                  <div>
-                    <h2 className="text-lg font-bold text-slate-200">
-                      {pdfDoc ? 'نظام المعالجة الآلية' : 'محطة رفع الملفات'}
-                    </h2>
-                    <p className="text-xs text-slate-500">
-                      الصفحة الحالية: <span className="font-bold text-[#c5a059] font-mono text-sm">{toHindi(activeSession.currentPage)}</span>
-                    </p>
+          <Route path="/workspace" element={
+            activeSession ? (
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 lg:gap-6 lg:h-[calc(100vh-6rem)]">
+                <section className="flex flex-col gap-4 h-full order-1 lg:order-1 min-h-[500px] lg:min-h-0">
+                  {pdfDoc && batchStatus !== 'idle' && (
+                    <BatchControls
+                      totalPDFPages={pdfDoc.numPages}
+                      currentPDFPage={currentPdfPageIdx}
+                      isProcessing={batchStatus === 'running'}
+                      isPaused={batchStatus === 'paused'}
+                      onPause={pauseBatch}
+                      onResume={resumeBatch}
+                      fileName={pdfFileName}
+                    />
+                  )}
+                  <div className="bg-slate-900 p-4 rounded-2xl shadow-2xl border border-white/5 flex-1 flex flex-col relative overflow-hidden">
+                    <div className="flex items-center justify-between mb-3 z-10">
+                      <div>
+                        <h2 className="text-lg font-bold text-slate-200">
+                          {pdfDoc ? 'نظام المعالجة الآلية' : 'محطة رفع الملفات'}
+                        </h2>
+                        <p className="text-xs text-slate-500">
+                          الصفحة الحالية: <span className="font-bold text-[#c5a059] font-mono text-sm">{toHindi(activeSession.currentPage)}</span>
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-bold text-slate-500">ص:</span>
+                        <input type="number" value={activeSession.currentPage} onChange={(e) => setActiveSession({...activeSession, currentPage: parseInt(e.target.value) || 1})} className="w-20 px-2 py-1 bg-slate-800 border border-slate-700 rounded text-center font-bold outline-none text-[#c5a059] focus:border-[#c5a059]" />
+                      </div>
+                    </div>
+                    <div className="flex-1 min-h-0 z-10">
+                      <ImageUploader
+                        image={currentImage}
+                        onImageSelected={handleImageSelected}
+                        onPdfSelected={handlePdfSelected}
+                        onClear={() => {
+                          setCurrentImage(null);
+                          setLoadingState(LoadingState.IDLE);
+                          setBatchStatus('idle');
+                          setPdfDoc(null);
+                          batchControlRef.current.shouldStop = true;
+                        }}
+                        isLoading={loadingState === LoadingState.ANALYZING}
+                        isPdfMode={!!pdfDoc}
+                      />
+                    </div>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-bold text-slate-500">ص:</span>
-                    <input type="number" value={activeSession.currentPage} onChange={(e) => setActiveSession({...activeSession, currentPage: parseInt(e.target.value) || 1})} className="w-20 px-2 py-1 bg-slate-800 border border-slate-700 rounded text-center font-bold outline-none text-[#c5a059] focus:border-[#c5a059]" />
-                  </div>
-                </div>
-                <div className="flex-1 min-h-0 z-10">
-                  <ImageUploader
-                    image={currentImage}
-                    onImageSelected={handleImageSelected}
-                    onPdfSelected={handlePdfSelected}
-                    onClear={() => {
-                      setCurrentImage(null);
-                      setLoadingState(LoadingState.IDLE);
-                      setBatchStatus('idle');
-                      setPdfDoc(null);
-                      batchControlRef.current.shouldStop = true;
-                    }}
-                    isLoading={loadingState === LoadingState.ANALYZING}
-                    isPdfMode={!!pdfDoc}
-                  />
-                </div>
+                </section>
+                <section className="flex flex-col h-full order-2 lg:order-2 min-h-[500px] lg:min-h-0">
+                   <ResultDisplay text={lastPageData?.text || null} isLoading={loadingState === LoadingState.ANALYZING} error={error} onTextChange={handleUpdatePageText} pageNumber={lastPageData?.pageNumber} bookTitle={activeSession.bookTitle} isAutoSaved={true} />
+                </section>
               </div>
-            </section>
-            <section className="flex flex-col h-full order-2 lg:order-2 min-h-[500px] lg:min-h-0">
-               <ResultDisplay text={lastPageData?.text || null} isLoading={loadingState === LoadingState.ANALYZING} error={error} onTextChange={handleUpdatePageText} pageNumber={lastPageData?.pageNumber} bookTitle={activeSession.bookTitle} isAutoSaved={true} />
-            </section>
-          </div>
-        )}
+            ) : null
+          } />
 
-        {view === 'library' && (
-          <LibraryView
-            library={library}
-            currentUserId={firebaseUser?.uid}
-            setLibrary={setLibrary}
-            onDeleteBookFromCloud={deleteBookFromCloud}
-            onDeletePage={handleDeletePage}
-            onLoadPage={(bookId, page) => {
-              const bookTitle = library.books[bookId]?.title || '';
-              setActiveSession({ bookId, bookTitle, currentPage: page.pageNumber });
-              setLastProcessedPageId(page.id);
-              setView('workspace');
-            }}
-            onInsertPage={(bookId, afterPageNumber) => {
-              const bookTitle = library.books[bookId]?.title || '';
-              setActiveSession({ bookId, bookTitle, currentPage: afterPageNumber + 1 });
-              setView('workspace');
-            }}
-            onUpdatePageNumber={handlePageNumberEdit}
-            onOpenFullViewer={(bookId, mode) => {
-              setViewingBookId(bookId);
-              setViewerMode(mode);
-              setView('full-viewer');
-            }}
-          />
-        )}
+          <Route path="/library" element={
+            <LibraryView
+              library={library}
+              currentUserId={firebaseUser?.uid}
+              setLibrary={setLibrary}
+              onDeleteBookFromCloud={deleteBookFromCloud}
+              onDeletePage={handleDeletePage}
+              onLoadPage={(bookId, page) => {
+                const bookTitle = library.books[bookId]?.title || '';
+                setActiveSession({ bookId, bookTitle, currentPage: page.pageNumber });
+                setLastProcessedPageId(page.id);
+                navigate('/workspace');
+              }}
+              onInsertPage={(bookId, afterPageNumber) => {
+                const bookTitle = library.books[bookId]?.title || '';
+                setActiveSession({ bookId, bookTitle, currentPage: afterPageNumber + 1 });
+                navigate('/workspace');
+              }}
+              onUpdatePageNumber={handlePageNumberEdit}
+              onOpenFullViewer={(bookId, mode) => {
+                navigate(`/viewer/${bookId}?mode=${mode}`);
+              }}
+            />
+          } />
 
-        {view === 'full-viewer' && viewingBookId && (
-          <FullBookViewer
-            book={library.books[viewingBookId]}
-            currentUserId={firebaseUser?.uid}
-            initialMode={viewerMode}
-            onClose={() => setView('library')}
-            onUpdatePage={handleUpdateBookPage}
-            onUpdateWholeBook={handleUpdateWholeBook}
-            onToggleStatus={() => handleToggleBookStatus(viewingBookId)}
-            onDeletePage={(pageId) => handleDeletePage(viewingBookId, pageId)}
-          />
-        )}
+          <Route path="/viewer/:bookId" element={
+            <ViewerPage
+              library={library}
+              firebaseUser={firebaseUser}
+              onUpdatePage={handleUpdateBookPage}
+              onUpdateWholeBook={handleUpdateWholeBook}
+              onToggleBookStatus={handleToggleBookStatus}
+              onDeletePage={handleDeletePage}
+            />
+          } />
+
+          {/* Catch-all: redirect unknown paths to landing */}
+          <Route path="*" element={null} />
+        </Routes>
       </main>
     </div>
+  );
+};
+
+// ── Viewer Page wrapper: reads bookId from URL params ──────────────────────
+const ViewerPage: React.FC<{
+  library: LibraryState;
+  firebaseUser: FirebaseUser | null;
+  onUpdatePage: (bookId: string, pageId: string, text: string) => void;
+  onUpdateWholeBook: (bookId: string, parsedPages: {id: string, text: string}[]) => void;
+  onToggleBookStatus: (bookId: string) => Promise<void>;
+  onDeletePage: (bookId: string, pageId: string) => void;
+}> = ({ library, firebaseUser, onUpdatePage, onUpdateWholeBook, onToggleBookStatus, onDeletePage }) => {
+  const { bookId } = useParams<{ bookId: string }>();
+  const navigate = useNavigate();
+  const location = useLocation();
+
+  if (!bookId || !library.books[bookId]) {
+    navigate('/library', { replace: true });
+    return null;
+  }
+
+  const searchParams = new URLSearchParams(location.search);
+  const viewerMode = (searchParams.get('mode') === 'edit' ? 'edit' : 'read') as 'read' | 'edit';
+
+  return (
+    <FullBookViewer
+      book={library.books[bookId]}
+      currentUserId={firebaseUser?.uid}
+      initialMode={viewerMode}
+      onClose={() => navigate('/library')}
+      onUpdatePage={onUpdatePage}
+      onUpdateWholeBook={onUpdateWholeBook}
+      onToggleStatus={() => onToggleBookStatus(bookId)}
+      onDeletePage={(pageId) => onDeletePage(bookId, pageId)}
+    />
   );
 };
 

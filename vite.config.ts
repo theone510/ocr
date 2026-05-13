@@ -13,6 +13,8 @@ export default defineConfig(({ mode }) => {
           'Cross-Origin-Opener-Policy': 'same-origin-allow-popups',
           'Cross-Origin-Embedder-Policy': 'unsafe-none',
         },
+        // SPA fallback: serve index.html for all routes (React Router)
+        historyApiFallback: true,
       },
       plugins: [react(), tailwindcss()],
       define: {
