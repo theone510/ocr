@@ -151,4 +151,4 @@ export const SYSTEM_INSTRUCTION = `
 | حديث غير موسوم / اقتباس | \`نص عادي: (...)\` |
 `;
 
-export const GEMINI_MODEL = 'gemini-3-flash-preview';
+export const GEMINI_MODEL = 'gemini-3.5-flash';
