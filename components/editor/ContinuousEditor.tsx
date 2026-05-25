@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef } from 'react';
 import { useEditor, EditorContent } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import TextAlign from '@tiptap/extension-text-align';
@@ -20,6 +20,15 @@ export const ContinuousEditor: React.FC<ContinuousEditorProps> = ({
   pages, onChange, onActivePageChange, readOnly = false 
 }) => {
 
+  // BUG #21 fix: keep a ref to the latest onChange so the useEditor closure never goes stale
+  const onChangeRef = useRef(onChange);
+  useEffect(() => {
+    onChangeRef.current = onChange;
+  });
+
+  // BUG #7 fix: track which pages were last loaded into the editor
+  const lastLoadedPagesRef = useRef<string>('');
+
   const editor = useEditor({
     extensions: [
       StarterKit.configure({
@@ -40,25 +49,29 @@ export const ContinuousEditor: React.FC<ContinuousEditorProps> = ({
     content: '',
     editable: !readOnly,
     onUpdate: ({ editor }) => {
-      if (onChange) onChange(editor.getHTML());
+      onChangeRef.current?.(editor.getHTML());
     },
   });
 
   useEffect(() => {
-    // We only want to set the initial content once, mapping it to Tiptap HTML
-    if (editor && pages && editor.isEmpty) {
-      let concatenatedHTML = '';
-      pages.forEach((page, idx) => {
-         const pageHtml = deserializeToTiptap(page.text, page.pageNumber, page.id);
-         concatenatedHTML += pageHtml;
-         
-         // Insert page divider between pages
-         if (idx < pages.length - 1) {
-             const nextPage = pages[idx + 1];
-             concatenatedHTML += `<div class="page-break" data-page-number="${nextPage.pageNumber}" data-page-id="${nextPage.id}"></div>`;
-         }
-      });
-      editor.commands.setContent(concatenatedHTML);
+    // BUG #7 fix: reload content when editor is empty OR when pages changed externally
+    if (editor && pages) {
+      const pagesJson = JSON.stringify(pages.map(p => ({ id: p.id, text: p.text })));
+      if (editor.isEmpty || lastLoadedPagesRef.current !== pagesJson) {
+        lastLoadedPagesRef.current = pagesJson;
+        let concatenatedHTML = '';
+        pages.forEach((page, idx) => {
+           const pageHtml = deserializeToTiptap(page.text, page.pageNumber, page.id);
+           concatenatedHTML += pageHtml;
+           
+           // Insert page divider between pages
+           if (idx < pages.length - 1) {
+               const nextPage = pages[idx + 1];
+               concatenatedHTML += `<div class="page-break" data-page-number="${nextPage.pageNumber}" data-page-id="${nextPage.id}"></div>`;
+           }
+        });
+        editor.commands.setContent(concatenatedHTML);
+      }
     }
   }, [editor, pages]);
 

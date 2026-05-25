@@ -2,6 +2,7 @@ import React, {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useRef,
   useState,
 } from 'react';
@@ -43,6 +44,14 @@ export const useToast = (): ToastContextValue => {
 export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const timersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+
+  useEffect(() => {
+    return () => {
+      // Clear all pending toast timers on unmount
+      Object.values(timersRef.current).forEach(id => clearTimeout(id));
+      timersRef.current = {};
+    };
+  }, []);
 
   const dismiss = useCallback((id: string) => {
     // Start exit animation

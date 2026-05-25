@@ -78,6 +78,7 @@ const App: React.FC = () => {
 
   // --- Firebase Auth State ---
   const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
+  const firebaseUserRef = useRef<FirebaseUser | null>(null);
   const [isAuthChecking, setIsAuthChecking] = useState(true);
 
   // --- PDF Batch State ---
@@ -101,7 +102,7 @@ const App: React.FC = () => {
 
   // ── Core: sync ONE book to Firestore after a 4-second debounce ────────────
   const scheduleBookSync = (bookId: string, bookData: Book) => {
-    if (!firebaseUser || !isCloudLoadedRef.current) return;
+    if (!firebaseUserRef.current || !isCloudLoadedRef.current) return;
     // Don't auto-sync while batch is running (prevents write stream exhaustion)
     if (batchRunningRef.current) {
       pendingBooksRef.current.add(bookId);
@@ -114,7 +115,7 @@ const App: React.FC = () => {
     pendingBooksRef.current.add(bookId);
     bookSyncTimers.current[bookId] = setTimeout(async () => {
       try {
-        await syncSingleBook(firebaseUser.uid, bookData);
+        await syncSingleBook(firebaseUserRef.current!.uid, bookData);
         pendingBooksRef.current.delete(bookId);
         delete bookSyncTimers.current[bookId];
       } catch (e) {
@@ -190,6 +191,7 @@ const App: React.FC = () => {
     shouldStop: false,
     activeBookId: '',
     failedPages: [] as {pdfPage: number, manuscriptPage: number}[],
+    sessionId: 0,
   });
 
   useEffect(() => {
@@ -210,6 +212,7 @@ const App: React.FC = () => {
     }
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       setFirebaseUser(user);
+      firebaseUserRef.current = user;
       if (user) {
         try {
           const cloudLibrary = await loadLibraryFromFirestore(user.uid);
@@ -280,6 +283,13 @@ const App: React.FC = () => {
     };
     window.addEventListener('beforeinstallprompt', handler);
     return () => window.removeEventListener('beforeinstallprompt', handler);
+  }, []);
+
+  // Cleanup: clear all pending book sync timers on unmount
+  useEffect(() => {
+    return () => {
+      Object.values(bookSyncTimers.current).forEach(clearTimeout);
+    };
   }, []);
 
   const handleInstallApp = () => {
@@ -414,6 +424,7 @@ const App: React.FC = () => {
 
         setLastProcessedPageId(pageId);
         setLoadingState(LoadingState.SUCCESS);
+        setActiveSession(prev => prev ? ({ ...prev, currentPage: prev.currentPage + 1 }) : null);
       }
     } catch (err: any) {
       console.error(err);
@@ -446,6 +457,7 @@ const App: React.FC = () => {
           shouldStop: false,
           activeBookId: activeSession.bookId,
           failedPages: [],
+          sessionId: batchControlRef.current.sessionId + 1,
         };
         batchRunningRef.current = true;
 
@@ -465,7 +477,8 @@ const App: React.FC = () => {
 
   // Process a chunk of pages (sequential with CONCURRENT_PAGES=1, or parallel if increased)
   const processBatchChunk = async (doc: PDFDocumentProxy, startPdfPage: number, startManuscriptPage: number) => {
-    if (batchControlRef.current.shouldStop) {
+    const mySessionId = batchControlRef.current.sessionId;
+    if (batchControlRef.current.shouldStop || batchControlRef.current.sessionId !== mySessionId) {
       setBatchStatus('paused');
       setLoadingState(LoadingState.IDLE);
       return;
@@ -557,9 +570,9 @@ const App: React.FC = () => {
 
     // Move to next page after a short delay
     setTimeout(() => {
-      if (!batchControlRef.current.shouldStop) {
+      if (!batchControlRef.current.shouldStop && batchControlRef.current.sessionId === mySessionId) {
         processBatchChunk(doc, startPdfPage + 1, startManuscriptPage + 1);
-      } else {
+      } else if (batchControlRef.current.sessionId === mySessionId) {
         setBatchStatus('paused');
         setLoadingState(LoadingState.IDLE);
       }
@@ -978,8 +991,13 @@ const ViewerPage: React.FC<{
   const navigate = useNavigate();
   const location = useLocation();
 
+  useEffect(() => {
+    if (!bookId || !library.books[bookId]) {
+      navigate('/library', { replace: true });
+    }
+  }, [bookId, library.books, navigate]);
+
   if (!bookId || !library.books[bookId]) {
-    navigate('/library', { replace: true });
     return null;
   }
 

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { Book } from '../types';
 import { loadPDF, renderPageAsImage, PDFDocumentProxy } from '../services/pdfService';
 import { ContinuousEditor } from './editor/ContinuousEditor';
@@ -60,7 +60,13 @@ export const FullBookViewer: React.FC<FullBookViewerProps> = ({
 
   // PAGE FLIPPING LOGIC
   const [activePageIndex, setActivePageIndex] = useState(0);
-  const totalPages = book.pages.length;
+
+  // BUG #15 FIX: Sort pages by pageNumber so access order is always consistent
+  const sortedPages = useMemo(
+    () => [...book.pages].sort((a, b) => a.pageNumber - b.pageNumber),
+    [book.pages]
+  );
+  const totalPages = sortedPages.length;
 
   // Ref for scroll container to handle pagination on scroll
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -91,6 +97,8 @@ export const FullBookViewer: React.FC<FullBookViewerProps> = ({
   //   • activePageIndex is NOT needed here — the functional updaters handle it
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // BUG #22 FIX: Don't navigate when user is typing in an input/textarea/select
+      if (['INPUT', 'TEXTAREA', 'SELECT'].includes((e.target as HTMLElement).tagName)) return;
       if (mode === 'read') {
         if (e.key === 'ArrowRight') handlePrevPage(); // RTL: right = previous page
         if (e.key === 'ArrowLeft')  handleNextPage(); // RTL: left  = next page
@@ -102,7 +110,8 @@ export const FullBookViewer: React.FC<FullBookViewerProps> = ({
 
   useEffect(() => {
     const extractedToc: any[] = [];
-    book.pages.forEach((p, idx) => {
+    // BUG #15 FIX: Use sortedPages so TOC indexes match sorted page order
+    sortedPages.forEach((p, idx) => {
       const matches = p.text.matchAll(/<(h[1-5])>(.*?)<\/\1>/g);
       for (const match of matches) {
         // Strip nested tags like <bold> or <center> from the heading text for the index
@@ -117,7 +126,19 @@ export const FullBookViewer: React.FC<FullBookViewerProps> = ({
       }
     });
     setToc(extractedToc);
-  }, [book]);
+  }, [sortedPages]);
+
+  // BUG #23 FIX: Helper to escape special regex characters in heading titles
+  const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  // BUG #23 FIX: Replace only the N-th occurrence of a regex pattern in text
+  const replaceNthOccurrence = (text: string, pattern: RegExp, n: number, replacement: string): string => {
+    let count = 0;
+    return text.replace(pattern, (match) => {
+      count++;
+      return count === n ? replacement : match;
+    });
+  };
 
   const changePage = (index: number, targetHeadingTitle?: string) => {
     if (index < 0 || index >= totalPages) return;
@@ -144,7 +165,8 @@ export const FullBookViewer: React.FC<FullBookViewerProps> = ({
               return;
             }
           }
-          const targetPageNum = book.pages[index]?.pageNumber.toString();
+          // BUG #15 FIX: Use sortedPages for correct index-to-pageNumber mapping
+          const targetPageNum = sortedPages[index]?.pageNumber.toString();
           if (targetPageNum) {
             const targetBreak = Array.from(edScroll.querySelectorAll('.page-break')).find(b => b.getAttribute('data-page-number') === targetPageNum);
             if (targetBreak) {
@@ -159,8 +181,15 @@ export const FullBookViewer: React.FC<FullBookViewerProps> = ({
   };
 
   const handleChangeHeadingLevel = (item: any, newLevel: number) => {
-    const page = book.pages.find(p => p.pageNumber === item.page);
+    const page = sortedPages.find(p => p.pageNumber === item.page);
     if (!page) return;
+
+    // BUG #23 FIX: Guard against duplicate heading titles — only proceed if title is unique
+    const occurrences = (page.text.match(new RegExp(`<h[1-5]>${escapeRegex(item.title)}<\/h[1-5]>`, 'g')) || []).length;
+    if (occurrences > 1) {
+      // Skip silently to avoid mutating the wrong heading when duplicates exist
+      return;
+    }
 
     const newText = page.text.replace(/<(h[1-5])>(.*?)<\/\1>/g, (match, tag, title) => {
       const cleanTitle = title.replace(/<[^>]+>/g, '').trim();
@@ -180,8 +209,16 @@ export const FullBookViewer: React.FC<FullBookViewerProps> = ({
     const nextItem = toc[currentIdx + 1];
 
     if (item.page === nextItem.page) {
-      const page = book.pages.find(p => p.pageNumber === item.page);
+      const page = sortedPages.find(p => p.pageNumber === item.page);
       if (!page) return;
+
+      // BUG #23 FIX: Guard against duplicate heading titles to avoid wrong merge
+      const occurrencesItem = (page.text.match(new RegExp(`<h[1-5]>${escapeRegex(item.title)}<\/h[1-5]>`, 'g')) || []).length;
+      const occurrencesNext = (page.text.match(new RegExp(`<h[1-5]>${escapeRegex(nextItem.title)}<\/h[1-5]>`, 'g')) || []).length;
+      if (occurrencesItem > 1 || occurrencesNext > 1) {
+        toast.info('لا يمكن الدمج: يوجد عنوان مكرر بنفس الاسم في الصفحة.');
+        return;
+      }
 
       let firstFound = false;
       let mergedTitleInner = '';
@@ -198,7 +235,8 @@ export const FullBookViewer: React.FC<FullBookViewerProps> = ({
         return match;
       });
 
-      const finalText = tempText.replace(`___MERGE_TARGET___\\s*\\n*`, '').replace(`___MERGE_TARGET___`, '');
+      // BUG #6 FIX: Use a proper regex (with /g flag) instead of a template literal string
+      const finalText = tempText.replace(/___MERGE_TARGET___\s*\n*/g, '');
       onUpdatePage(book.id, page.id, finalText);
     } else {
       toast.info('الدمج بين العناوين في صفحات مختلفة غير مدعوم من الفهرس السريع، استخدم المحرر المتصل.');
@@ -206,8 +244,15 @@ export const FullBookViewer: React.FC<FullBookViewerProps> = ({
   };
 
   const handleRemoveHeading = (item: any) => {
-    const page = book.pages.find(p => p.pageNumber === item.page);
+    const page = sortedPages.find(p => p.pageNumber === item.page);
     if (!page) return;
+
+    // BUG #23 FIX: Guard against duplicate heading titles — only proceed if title is unique
+    const occurrences = (page.text.match(new RegExp(`<h[1-5]>${escapeRegex(item.title)}<\/h[1-5]>`, 'g')) || []).length;
+    if (occurrences > 1) {
+      // Skip silently to avoid mutating the wrong heading when duplicates exist
+      return;
+    }
 
     const newText = page.text.replace(/<(h[1-5])>(.*?)<\/\1>/g, (match, tag, title) => {
       const cleanTitle = title.replace(/<[^>]+>/g, '').trim();
@@ -223,7 +268,8 @@ export const FullBookViewer: React.FC<FullBookViewerProps> = ({
 
 
 
-  const currentPageData = book.pages[activePageIndex];
+  // BUG #15 FIX: Use sortedPages for consistent index-to-page access
+  const currentPageData = sortedPages[activePageIndex];
 
   const renderReadMode = () => {
     if (!currentPageData) return null;
@@ -286,13 +332,24 @@ export const FullBookViewer: React.FC<FullBookViewerProps> = ({
     setIsSyncingPdf(false);
   };
 
+  // BUG #13 FIX: Destroy syncPdfDoc when it changes or component unmounts
+  useEffect(() => {
+    return () => {
+      syncPdfDoc?.destroy();
+    };
+  }, [syncPdfDoc]);
+
   useEffect(() => {
     if (syncPdfDoc && mode === 'edit') {
+      // BUG #12 FIX: Track object URL so it can be revoked before setting a new one
+      let objectUrl: string | null = null;
+
       const renderPdfSync = async () => {
-        // Assuming user wants to sync with logical page number
-        const pageNum = book.pages[activePageIndex]?.pageNumber || activePageIndex + 1;
+        // BUG #15 FIX: Use sortedPages for correct index-to-pageNumber mapping
+        const pageNum = sortedPages[activePageIndex]?.pageNumber || activePageIndex + 1;
         try {
           const result = await renderPageAsImage(syncPdfDoc, pageNum);
+          objectUrl = result.previewUrl;
           setSyncImageUrl(result.previewUrl);
         } catch (err) {
           console.error("Failed to render sync page", err);
@@ -301,8 +358,13 @@ export const FullBookViewer: React.FC<FullBookViewerProps> = ({
         }
       };
       renderPdfSync();
+
+      // BUG #12 FIX: Revoke previous object URL on cleanup to prevent memory leak
+      return () => {
+        if (objectUrl) URL.revokeObjectURL(objectUrl);
+      };
     }
-  }, [syncPdfDoc, activePageIndex, mode, book.pages]);
+  }, [syncPdfDoc, activePageIndex, mode, sortedPages]);
 
   return (
     <div className="flex h-screen bg-slate-950 overflow-hidden relative" dir="rtl">
@@ -416,7 +478,7 @@ export const FullBookViewer: React.FC<FullBookViewerProps> = ({
                       <span className="w-1 h-1 bg-slate-600 rounded-full mx-1"></span>
                       <input type="file" ref={fileInputRef} accept="application/pdf" className="hidden" onChange={handleUploadSyncPdf} />
                       <button
-                        onClick={() => syncPdfDoc ? setSyncPdfDoc(null) : fileInputRef.current?.click()}
+                        onClick={() => { if (syncPdfDoc) { syncPdfDoc.destroy(); setSyncPdfDoc(null); } else { fileInputRef.current?.click(); } }}
                         className={`flex items-center gap-1.5 px-2 py-0.5 rounded border transition-colors ${syncPdfDoc ? 'bg-red-500/10 text-red-400 border-red-500/30 hover:bg-red-500/20' : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'}`}
                       >
                         {isSyncingPdf ? <span className="animate-pulse">جاري التحميل...</span> : syncPdfDoc ? <><X size={12}/> إغلاق المرفق</> : <><Upload size={12}/> إرفاق PDF للمطابقة</>}
@@ -443,7 +505,7 @@ export const FullBookViewer: React.FC<FullBookViewerProps> = ({
           {syncPdfDoc && mode === 'edit' && (
             <div className="hidden lg:flex flex-col w-1/2 border-l border-slate-800 bg-slate-950 p-4 overflow-y-auto animate-in fade-in slide-in-from-left duration-500">
               <div className="text-center mb-2 flex items-center justify-center gap-2 text-slate-500 text-sm font-bold bg-slate-900 py-2 rounded-lg border border-slate-800 shadow-inner">
-                <MonitorDown size={16} className="text-[#c5a059]" /> النص الأصلي المرفق - صفحة {toHindi(book.pages[activePageIndex]?.pageNumber)}
+                <MonitorDown size={16} className="text-[#c5a059]" /> النص الأصلي المرفق - صفحة {toHindi(sortedPages[activePageIndex]?.pageNumber)}
               </div>
               <div className="flex-1 flex items-center justify-center bg-slate-900 rounded-xl border border-slate-800 overflow-hidden shadow-2xl p-2 relative">
                 {syncImageUrl ? (
@@ -489,18 +551,20 @@ export const FullBookViewer: React.FC<FullBookViewerProps> = ({
               <input
                 type="range"
                 min="0"
-                max={totalPages - 1}
+                max={Math.max(0, totalPages - 1)}
                 value={activePageIndex}
                 onChange={(e) => changePage(parseInt(e.target.value))}
                 className="w-full h-1 bg-slate-700 rounded-lg appearance-none cursor-pointer focus:outline-none"
               />
               <div
                 className="absolute top-0 right-0 h-1 bg-[#c5a059] rounded-lg pointer-events-none"
-                style={{ width: `${((activePageIndex) / (totalPages - 1)) * 100}%` }}
+                style={{ width: `${totalPages > 1 ? Math.round((activePageIndex / (totalPages - 1)) * 100) : 0}%` }}
               ></div>
               {/* Tooltip on hover */}
-              <div className="absolute bottom-6 right-0 transform translate-x-1/2 opacity-0 group-hover:opacity-100 transition-opacity bg-slate-800 text-white text-xs font-mono py-1 px-2 rounded border border-white/10 pointer-events-none" style={{ right: `${100 - ((activePageIndex) / (totalPages - 1)) * 100}%` }}>
-                ص {toHindi(book.pages[activePageIndex]?.pageNumber)}
+              {/* BUG #4 FIX: Guard against division by zero when totalPages === 1 */}
+              <div className="absolute bottom-6 right-0 transform translate-x-1/2 opacity-0 group-hover:opacity-100 transition-opacity bg-slate-800 text-white text-xs font-mono py-1 px-2 rounded border border-white/10 pointer-events-none" style={{ right: `${100 - (totalPages > 1 ? Math.round((activePageIndex / (totalPages - 1)) * 100) : 0)}%` }}>
+                {/* BUG #15 FIX: Use sortedPages for correct page number display */}
+                ص {toHindi(sortedPages[activePageIndex]?.pageNumber)}
               </div>
             </div>
 
@@ -514,6 +578,7 @@ export const FullBookViewer: React.FC<FullBookViewerProps> = ({
                   <input
                     type="text"
                     value={activePageIndex + 1}
+                    onKeyDown={(e) => { if (e.key === 'ArrowUp') changePage(Math.min(totalPages - 1, activePageIndex + 1)); else if (e.key === 'ArrowDown') changePage(Math.max(0, activePageIndex - 1)); }}
                     onChange={(e) => {
                       const val = parseInt(e.target.value);
                       if (!isNaN(val) && val > 0 && val <= totalPages) {
@@ -577,8 +642,9 @@ export const FullBookViewer: React.FC<FullBookViewerProps> = ({
                         dangerous: true,
                       });
                       if (ok) {
-                        onDeletePage(currentPageData.id);
-                        if (activePageIndex >= totalPages - 1) changePage(Math.max(0, activePageIndex - 1));
+                         // BUG #5 FIX: Check boundary BEFORE deletion so totalPages is still the pre-deletion count
+                         if (activePageIndex >= totalPages - 1) changePage(Math.max(0, activePageIndex - 1));
+                         onDeletePage(currentPageData.id);
                       }
                     }}
                     className="flex items-center gap-1 px-2 py-1 rounded-lg bg-red-900/30 border border-red-500/30 text-red-400 hover:bg-red-600/40 hover:text-red-200 transition-all text-xs font-bold"

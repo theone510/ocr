@@ -69,7 +69,11 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
     });
     if (!ok) return;
     // Delete from Firestore immediately (passes UUID, not title)
-    onDeleteBookFromCloud(book.id);
+    try {
+      await onDeleteBookFromCloud(book.id);
+    } catch (e) {
+      console.error('Failed to delete book from cloud:', e);
+    }
     setLibrary(prev => {
       const newBooks = { ...prev.books };
       delete newBooks[book.id];

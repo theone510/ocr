@@ -15,7 +15,7 @@ export const deserializeToTiptap = (rawText: string, pageNumber: number, pageId:
     
     // Tags Replacement
     html = html
-      .replace(/<(h[1-3])>(.*?)<\/\1>/g, '<$1>$2</$1>') // Standard H1-H3 are fine for Tiptap Heading extension
+      .replace(/<(h[1-5])>(.*?)<\/\1>/g, '<$1>$2</$1>') // Standard H1-H5 are fine for Tiptap Heading extension
       .replace(/<center>(.*?)<\/center>/g, '<center>$1</center>') // Handled by CenterNode
       .replace(/<bold>(.*?)<\/bold>/g, '<bold>$1</bold>') // Handled by CustomBoldMark
       .replace(/<aya>(.*?)<\/aya>/g, '<aya>$1</aya>') // Handled by AyaMark
@@ -48,11 +48,33 @@ export const serializeFromTiptap = (html: string) => {
             const el = node as HTMLElement;
             const tag = el.tagName.toLowerCase();
             
+            // Helper: recursively extract inline content preserving marks
+            const extractInlineContent = (el: HTMLElement) => {
+                const before = result;
+                result = '';
+                Array.from(el.childNodes).forEach(processNode);
+                const inner = result;
+                result = before;
+                return inner;
+            };
+
             // Marks & Nodes mapped strictly by classes or tags
-            if (tag === 'h1') { result += `<h1>${el.textContent}</h1>\n`; } 
-            else if (tag === 'h2') { result += `<h2>${el.textContent}</h2>\n`; }
-            else if (tag === 'h3') { result += `<h3>${el.textContent}</h3>\n`; }
-            else if (el.classList.contains('editor-center') || tag === 'center') {
+            if (tag === 'h1' || el.classList.contains('editor-h1')) {
+                const inner = extractInlineContent(el);
+                result += `<h1>${inner || el.textContent}</h1>\n`;
+            } else if (tag === 'h2' || el.classList.contains('editor-h2')) {
+                const inner = extractInlineContent(el);
+                result += `<h2>${inner || el.textContent}</h2>\n`;
+            } else if (tag === 'h3' || el.classList.contains('editor-h3')) {
+                const inner = extractInlineContent(el);
+                result += `<h3>${inner || el.textContent}</h3>\n`;
+            } else if (tag === 'h4' || el.classList.contains('editor-h4')) {
+                const inner = extractInlineContent(el);
+                result += `<h4>${inner || el.textContent}</h4>\n`;
+            } else if (tag === 'h5' || el.classList.contains('editor-h5')) {
+                const inner = extractInlineContent(el);
+                result += `<h5>${inner || el.textContent}</h5>\n`;
+            } else if (el.classList.contains('editor-center') || tag === 'center') {
                 result += `\n<center>${el.textContent}</center>\n`;
             }
             else if (el.classList.contains('editor-poetry') || tag === 'poetry') {

@@ -28,6 +28,16 @@ self.addEventListener('fetch', (event) => {
   // Always return a valid Response so the browser never crashes.
   event.respondWith(
     fetch(event.request)
+      .then(response => {
+        // Cache successful responses (only GET requests with OK status)
+        if (event.request.method === 'GET' && response.ok) {
+          const responseToCache = response.clone();
+          caches.open(CACHE_NAME).then(cache => {
+            cache.put(event.request, responseToCache);
+          });
+        }
+        return response;
+      })
       .catch(() =>
         caches.match(event.request).then(
           (cached) => cached || new Response('', { status: 404, statusText: 'Not Found' })
