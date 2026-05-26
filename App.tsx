@@ -137,7 +137,9 @@ const App: React.FC = () => {
 
     const pending = [...pendingBooksRef.current];
     const allPrivateBooks = Object.entries(library.books)
-      .filter(([_, b]) => !b.ownerId || b.ownerId === firebaseUser.uid);
+      .filter(([_, b]) => !b.ownerId || b.ownerId === firebaseUser.uid)
+      // Guard: skip books with no valid id — they would crash Firestore's doc()
+      .filter(([_, b]) => b.id && typeof b.id === 'string' && b.id.trim() !== '');
 
     // If nothing pending, sync everything (full resync)
     const toSync = pending.length > 0

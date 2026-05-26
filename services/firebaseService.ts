@@ -98,6 +98,13 @@ export const logoutUser = async () => {
  */
 export const syncSingleBook = async (userId: string, book: Book): Promise<void> => {
   if (!db) throw new Error("Firestore not initialized");
+  // Guard: book.id must be a non-empty string — undefined/empty crashes ResourcePath.fromString
+  if (!book.id || typeof book.id !== 'string' || book.id.trim() === '') {
+    throw new Error(`syncSingleBook: book "${book.title}" has no valid id — skipping`);
+  }
+  if (!userId || typeof userId !== 'string') {
+    throw new Error('syncSingleBook: userId is invalid');
+  }
   const bookRef = doc(db, "users", userId, "books", book.id);
   await setDoc(bookRef, book);
 };
