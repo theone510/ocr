@@ -1,6 +1,12 @@
 /// <reference types="vite/client" />
 import { initializeApp } from "firebase/app";
-import { getFirestore, doc, setDoc, getDoc, collection, getDocs, deleteDoc } from "firebase/firestore";
+import {
+  initializeFirestore,
+  persistentLocalCache,
+  persistentMultipleTabManager,
+  doc, setDoc, getDoc, collection, getDocs, deleteDoc,
+  type Firestore,
+} from "firebase/firestore";
 import { getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, signOut } from "firebase/auth";
 import { LibraryState, Book } from "../types";
 
@@ -15,14 +21,24 @@ const firebaseConfig = {
 
 // Initialize Firebase safely
 let app: any;
-export let db: ReturnType<typeof getFirestore> | null = null;
+export let db: Firestore | null = null;
 export let auth: ReturnType<typeof getAuth> | null = null;
 export let googleProvider: GoogleAuthProvider | null = null;
 
 try {
   if (firebaseConfig.apiKey) {
     app = initializeApp(firebaseConfig);
-    db = getFirestore(app);
+
+    // Use persistentLocalCache (IndexedDB) so Firestore keeps working even when
+    // an ad-blocker blocks the live WebSocket / long-poll channels
+    // (ERR_BLOCKED_BY_CLIENT on firestore.googleapis.com/Listen or /Write).
+    // Writes are queued locally and synced automatically when the channel recovers.
+    db = initializeFirestore(app, {
+      localCache: persistentLocalCache({
+        tabManager: persistentMultipleTabManager(),
+      }),
+    });
+
     auth = getAuth(app);
     googleProvider = new GoogleAuthProvider();
   } else {

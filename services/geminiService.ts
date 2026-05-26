@@ -2,8 +2,8 @@
 import { GoogleGenAI } from "@google/genai";
 import { SYSTEM_INSTRUCTION, GEMINI_MODEL } from "../constants";
 
-const MAX_RETRIES = 2;
-const BASE_DELAY_MS = 1000; // 1 second base delay for exponential backoff
+const MAX_RETRIES = 5;        // 6 total attempts (attempt 0 + 5 retries)
+const BASE_DELAY_MS = 2000;   // 2s→4s→8s→16s→32s exponential backoff
 
 // Helper: delay for a given number of milliseconds
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -16,9 +16,12 @@ export const analyzeManuscript = async (base64Image: string, mimeType: string): 
     try {
       // Wait before retry (exponential backoff): 0s, 2s, 4s, 8s
       if (attempt > 0) {
+        // Exponential backoff + jitter: prevents all users retrying at the same instant
         const backoffMs = BASE_DELAY_MS * Math.pow(2, attempt - 1);
-        console.log(`Retry attempt ${attempt}/${MAX_RETRIES} after ${backoffMs}ms...`);
-        await delay(backoffMs);
+        const jitterMs  = Math.random() * 1000; // 0–1000ms random
+        const totalWait = Math.round(backoffMs + jitterMs);
+        console.log(`Retry attempt ${attempt}/${MAX_RETRIES} after ${totalWait}ms...`);
+        await delay(totalWait);
       }
 
       const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_GEMINI_API_KEY });
@@ -81,13 +84,16 @@ export const analyzeManuscript = async (base64Image: string, mimeType: string): 
       lastError = error;
       
       // Check if this is a retryable error (network/rate-limit)
-      const isRetryable = 
-        error.message?.includes('Failed to fetch') ||
-        error.message?.includes('ERR_FAILED') ||
-        error.message?.includes('429') ||
+      // Only retry on transient server/network errors — fail fast on anything else
+      const isRetryable =
+        error.status === 503 ||
+        error.status === 429 ||
         error.message?.includes('503') ||
-        error.message?.includes('rate') ||
+        error.message?.includes('429') ||
+        error.message?.includes('UNAVAILABLE') ||
         error.message?.includes('RESOURCE_EXHAUSTED') ||
+        error.message?.includes('rate') ||
+        error.message?.includes('Failed to fetch') ||
         error.message?.includes('network');
       
       if (!isRetryable || attempt === MAX_RETRIES) {
