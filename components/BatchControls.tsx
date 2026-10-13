@@ -2,7 +2,7 @@
 import React from 'react';
 import { Play, Pause, Loader2, CheckCircle2 } from 'lucide-react';
 import { Button } from './Button';
-import { toHindi } from '../App';
+import { toHindi } from '../utils/digits';
 
 interface BatchControlsProps {
   totalPDFPages: number;
@@ -23,7 +23,9 @@ export const BatchControls: React.FC<BatchControlsProps> = ({
   onResume,
   fileName
 }) => {
-  const progress = Math.min(100, Math.round((currentPDFPage / totalPDFPages) * 100));
+  // currentPDFPage can run one past the last page once it finishes; clamp for display
+  const displayPage = Math.min(currentPDFPage, totalPDFPages);
+  const progress = totalPDFPages > 0 ? Math.min(100, Math.round((displayPage / totalPDFPages) * 100)) : 0;
 
   return (
     <div className="bg-slate-900 p-4 rounded-xl shadow-lg border border-white/5 mb-4 animate-in slide-in-from-top-2">
@@ -56,7 +58,7 @@ export const BatchControls: React.FC<BatchControlsProps> = ({
       {/* Ticker Progress Bar */}
       <div className="space-y-1">
          <div className="flex justify-between text-xs font-bold text-slate-400 font-mono">
-            <span>PAGE: {toHindi(currentPDFPage)} / {toHindi(totalPDFPages)}</span>
+            <span>PAGE: {toHindi(displayPage)} / {toHindi(totalPDFPages)}</span>
             <span className={isPaused ? "text-amber-500" : "text-emerald-400"}>{toHindi(progress)}%</span>
          </div>
          <div className="h-1.5 w-full bg-slate-800 rounded-full overflow-hidden border border-white/5">

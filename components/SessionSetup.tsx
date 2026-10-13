@@ -3,10 +3,11 @@ import React, { useState, useEffect } from 'react';
 import { LibraryIcon, Plus, ArrowLeft, Building2, User, Hash, BookCopy, Calendar, MapPin, FileDigit } from 'lucide-react';
 import { Button } from './Button';
 import { LibraryState } from '../types';
-import { toHindi } from '../App';
+import { toHindi } from '../utils/digits';
 
 interface SessionSetupProps {
   library: LibraryState;
+  currentUserId?: string;
   onStartSession: (data: { 
     bookTitle: string, 
     startPage: number,
@@ -23,8 +24,12 @@ interface SessionSetupProps {
   onAddAuthor: (name: string) => void;
 }
 
-export const SessionSetup: React.FC<SessionSetupProps> = ({ library, onStartSession, onOpenLibrary, onAddPublisher, onAddAuthor }) => {
-  const books = Object.keys(library.books);
+export const SessionSetup: React.FC<SessionSetupProps> = ({ library, currentUserId, onStartSession, onOpenLibrary, onAddPublisher, onAddAuthor }) => {
+  // Only books the current user may edit (public books from other users are read-only)
+  const books = Object.keys(library.books).filter(title => {
+    const ownerId = library.books[title].ownerId;
+    return !ownerId || ownerId === currentUserId;
+  });
   const hasBooks = books.length > 0;
 
   const [mode, setMode] = useState<'select' | 'create'>(hasBooks ? 'select' : 'create');
@@ -102,9 +107,14 @@ export const SessionSetup: React.FC<SessionSetupProps> = ({ library, onStartSess
         isSeries: book.isSeries || false,
         volumeNumber: book.volumeNumber || ''
       });
-    } else if ((mode === 'create' || !hasBooks) && newBookTitle) {
+    } else if ((mode === 'create' || !hasBooks) && newBookTitle.trim()) {
+      const existing = library.books[newBookTitle.trim()];
+      if (existing?.ownerId && existing.ownerId !== currentUserId) {
+        alert('يوجد كتاب منشور بهذا العنوان لمستخدم آخر. الرجاء اختيار عنوان مختلف.');
+        return;
+      }
       onStartSession({
-        bookTitle: newBookTitle,
+        bookTitle: newBookTitle.trim(),
         startPage: startPage,
         author,
         publisher,
@@ -119,7 +129,7 @@ export const SessionSetup: React.FC<SessionSetupProps> = ({ library, onStartSess
 
   const isCreateMode = mode === 'create' || !hasBooks;
   const isFormValid = isCreateMode 
-    ? (newBookTitle && author && publisher) 
+    ? (newBookTitle.trim() && author && publisher) 
     : (selectedBook);
 
   return (

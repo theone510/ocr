@@ -1,4 +1,4 @@
-import { toHindi, fromHindi } from '../../App';
+import { toHindi } from '../../utils/digits';
 
 /**
  * Transforms the RAW database text (with custom pseudo-tags) 
@@ -15,7 +15,7 @@ export const deserializeToTiptap = (rawText: string, pageNumber: number, pageId:
     
     // Tags Replacement
     html = html
-      .replace(/<(h[1-3])>(.*?)<\/\1>/g, '<$1>$2</$1>') // Standard H1-H3 are fine for Tiptap Heading extension
+      .replace(/<(h[1-6])>(.*?)<\/\1>/g, '<$1>$2</$1>') // Standard headings are fine for Tiptap Heading extension
       .replace(/<center>(.*?)<\/center>/g, '<center>$1</center>') // Handled by CenterNode
       .replace(/<bold>(.*?)<\/bold>/g, '<bold>$1</bold>') // Handled by CustomBoldMark
       .replace(/<aya>(.*?)<\/aya>/g, '<aya>$1</aya>') // Handled by AyaMark
@@ -49,9 +49,7 @@ export const serializeFromTiptap = (html: string) => {
             const tag = el.tagName.toLowerCase();
             
             // Marks & Nodes mapped strictly by classes or tags
-            if (tag === 'h1') { result += `<h1>${el.textContent}</h1>\n`; } 
-            else if (tag === 'h2') { result += `<h2>${el.textContent}</h2>\n`; }
-            else if (tag === 'h3') { result += `<h3>${el.textContent}</h3>\n`; }
+            if (/^h[1-6]$/.test(tag)) { result += `<${tag}>${el.textContent}</${tag}>\n`; }
             else if (el.classList.contains('editor-center') || tag === 'center') {
                 result += `\n<center>${el.textContent}</center>\n`;
             }
