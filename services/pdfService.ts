@@ -1,14 +1,13 @@
 
 import * as pdfjsLib from 'pdfjs-dist';
+// Bundle the worker with the app so it always matches the library version and works offline
+import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.js?url';
 
 // Handle potential default export structure from CDN/esm.sh
 const pdfjs = (pdfjsLib as any).default || pdfjsLib;
 
-// DYNAMIC VERSION FIX:
-// Instead of hardcoding the version, we read it from the loaded library.
-// This guarantees the Main Thread and Worker Thread versions always match.
 if (pdfjs.GlobalWorkerOptions) {
-  pdfjs.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.js`;
+  pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 }
 
 export interface PDFDocumentProxy {
@@ -28,7 +27,8 @@ export const loadPDF = async (file: File): Promise<PDFDocumentProxy> => {
       standardFontDataUrl: `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/standard_fonts/`
     });
     
-    return loadingTask.promise;
+    // Await here so failures (corrupt / password-protected files) reach the catch below
+    return await loadingTask.promise;
   } catch (error) {
     console.error("Error loading PDF:", error);
     throw new Error("فشل تحميل ملف PDF. تأكد من أن الملف سليم وغير محمي بكلمة مرور.");

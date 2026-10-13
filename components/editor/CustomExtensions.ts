@@ -1,5 +1,18 @@
 import { Mark, Node, mergeAttributes } from '@tiptap/core';
 
+declare module '@tiptap/core' {
+  interface Commands<ReturnType> {
+    poetry: {
+      setPoetry: () => ReturnType;
+      togglePoetry: () => ReturnType;
+    };
+    centerNode: {
+      setCenterNode: () => ReturnType;
+      toggleCenterNode: () => ReturnType;
+    };
+  }
+}
+
 // --- MARKS (Inline Elements) ---
 
 export const AyaMark = Mark.create({

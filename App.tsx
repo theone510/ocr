@@ -12,6 +12,7 @@ import { BatchControls } from './components/BatchControls';
 import { Button } from './components/Button';
 import { ContinuousEditor } from './components/editor/ContinuousEditor';
 import { extractPagesFromHTML } from './components/editor/EditorUtils';
+import { toHindi, fromHindi } from './utils/digits';
 import { 
   ScrollText, 
   BookOpen, 
@@ -49,16 +50,30 @@ const STORAGE_KEY = 'manuscript_library_v2';
 
 const generateId = () => Date.now().toString(36) + Math.random().toString(36).slice(2);
 
-// Helper to convert Western digits to Hindi digits
-export const toHindi = (num: number | string | undefined | null): string => {
-  if (num === undefined || num === null) return '';
-  return String(num).replace(/\d/g, d => "٠١٢٣٤٥٦٧٨٩"[parseInt(d)]);
-};
+// Escape text interpolated into generated HTML documents
+const escapeHtml = (str: string | undefined | null): string =>
+  String(str ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
 
-// Helper to convert Hindi digits to Western digits (for import parsing)
-export const fromHindi = (str: string | undefined | null): string => {
-  if (!str) return '';
-  return str.replace(/[٠-٩]/g, d => "0123456789"["٠١٢٣٤٥٦٧٨٩".indexOf(d)]);
+const RAW_TAGS = ['aya', 'hadith', 'bold', 'center', 'poetry', 'footnote'];
+
+// Converts rendered HTML (our HTML export, or raw pseudo-tags) back into the
+// stored pseudo-tag format, e.g. <span class="aya">..</span> -> <aya>..</aya>
+const htmlToRawTags = (root: Element): string => {
+  const walk = (node: Node): string => {
+    if (node.nodeType === Node.TEXT_NODE) return node.textContent || '';
+    if (node.nodeType !== Node.ELEMENT_NODE) return '';
+    const el = node as HTMLElement;
+    const tag = el.tagName.toLowerCase();
+    const inner = () => Array.from(el.childNodes).map(walk).join('');
+
+    if (/^h[1-6]$/.test(tag)) return `<${tag}>${inner()}</${tag}>`;
+    if (tag === 'br') return '\n';
+    if (RAW_TAGS.includes(tag)) return `<${tag}>${inner()}</${tag}>`;
+    const rawTag = RAW_TAGS.find(t => el.classList.contains(t) || el.classList.contains(`viewer-${t}`) || el.classList.contains(`editor-${t}`));
+    if (rawTag) return `<${rawTag}>${inner()}</${rawTag}>`;
+    return inner() + (tag === 'div' || tag === 'p' ? '\n' : '');
+  };
+  return Array.from(root.childNodes).map(walk).join('').trim();
 };
 
 const App: React.FC = () => {
@@ -107,9 +122,12 @@ const App: React.FC = () => {
   const isCloudLoadedRef = useRef(false);
 
   // Ref to handle loop control without dependency staleness
+  // runId identifies the current batch loop so a stale loop (e.g. one still awaiting
+  // Gemini when the user pauses and resumes) can't save duplicate pages.
   const batchControlRef = useRef({ 
     shouldStop: false, 
     activeBook: '', 
+    runId: 0,
   });
 
   useEffect(() => {
@@ -155,18 +173,24 @@ const App: React.FC = () => {
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(library));
-      if (firebaseUser && isCloudLoadedRef.current) {
-        const privateLibrary = { 
-          ...library, 
-          books: Object.fromEntries(
-            Object.entries(library.books).filter(([_, b]) => !b.ownerId || b.ownerId === firebaseUser.uid)
-          ) 
-        };
-        syncLibraryToFirestore(firebaseUser.uid, privateLibrary).catch(e => console.error(e));
-      }
     } catch (e) {
       console.error("Storage Error", e);
     }
+
+    if (!firebaseUser || !isCloudLoadedRef.current) return;
+
+    // Debounce cloud sync so rapid edits (e.g. typing in the editor) don't
+    // trigger a Firestore write on every keystroke.
+    const timer = setTimeout(() => {
+      const privateLibrary = {
+        ...library,
+        books: Object.fromEntries(
+          Object.entries(library.books).filter(([_, b]) => !b.ownerId || b.ownerId === firebaseUser.uid)
+        )
+      };
+      syncLibraryToFirestore(firebaseUser.uid, privateLibrary).catch(e => console.error(e));
+    }, 1500);
+    return () => clearTimeout(timer);
   }, [library, firebaseUser]);
 
   // Handle PWA Install Prompt
@@ -221,6 +245,7 @@ const App: React.FC = () => {
        }));
     }
 
+    batchControlRef.current.shouldStop = true;
     setActiveSession({ bookTitle: data.bookTitle, currentPage: data.startPage });
     setView('workspace');
     setLastProcessedPageId(null);
@@ -233,6 +258,7 @@ const App: React.FC = () => {
   };
 
   const handleEndSession = () => {
+    batchControlRef.current.shouldStop = true;
     setActiveSession(null);
     setView('setup');
     setPdfDoc(null);
@@ -304,6 +330,8 @@ const App: React.FC = () => {
 
         setLastProcessedPageId(pageId);
         setLoadingState(LoadingState.SUCCESS);
+        // Advance to the next page so the next upload doesn't get inserted before this one
+        setActiveSession(prev => prev ? { ...prev, currentPage: activeSession.currentPage + 1 } : null);
       }
     } catch (err: any) {
       console.error(err);
@@ -319,6 +347,7 @@ const App: React.FC = () => {
     if (!activeSession) return;
     
     setLoadingState(LoadingState.ANALYZING); // Show global loading while parsing PDF
+    setError(null);
     try {
       const doc = await loadPDF(file);
       setPdfDoc(doc);
@@ -345,11 +374,12 @@ const App: React.FC = () => {
         batchControlRef.current = {
           shouldStop: false,
           activeBook: activeSession.bookTitle,
+          runId: batchControlRef.current.runId + 1,
         };
         
         // Start immediately
         setBatchStatus('running');
-        processNextBatchPage(doc, safeStartIdx, activeSession.currentPage);
+        processNextBatchPage(doc, safeStartIdx, activeSession.currentPage, batchControlRef.current.runId);
       } else {
         // Cancelled
         setPdfDoc(null);
@@ -363,7 +393,10 @@ const App: React.FC = () => {
     }
   };
 
-  const processNextBatchPage = async (doc: PDFDocumentProxy, pdfPageNum: number, manuscriptPageNum: number) => {
+  const processNextBatchPage = async (doc: PDFDocumentProxy, pdfPageNum: number, manuscriptPageNum: number, runId: number) => {
+    // Ignore loops superseded by a newer run
+    if (runId !== batchControlRef.current.runId) return;
+
     // Check Stop Condition
     if (batchControlRef.current.shouldStop) {
         setBatchStatus('paused');
@@ -397,6 +430,9 @@ const App: React.FC = () => {
 
       // 3. Analyze (Extract Text)
       const text = await analyzeManuscript(base64, mimeType);
+
+      // A newer run started while we were waiting; it will (re)process this page
+      if (runId !== batchControlRef.current.runId) return;
       
       // 4. Save
       const pageId = generateId();
@@ -439,13 +475,18 @@ const App: React.FC = () => {
       });
 
       setLastProcessedPageId(pageId);
+
+      // Advance the cursors so a pause/resume continues from the NEXT page
+      // instead of re-processing (and duplicating) the one just saved.
+      setCurrentPdfPageIdx(pdfPageNum + 1);
+      setActiveSession(prev => prev ? ({ ...prev, currentPage: manuscriptPageNum + 1 }) : null);
       
       // 5. Loop (Sequential Processing)
       // Small delay to allow UI to render the completion of this page before starting next
       setTimeout(() => {
           // Re-check stop condition before next iteration inside timeout
           if (!batchControlRef.current.shouldStop) {
-            processNextBatchPage(doc, pdfPageNum + 1, manuscriptPageNum + 1);
+            processNextBatchPage(doc, pdfPageNum + 1, manuscriptPageNum + 1, runId);
           } else {
              setBatchStatus('paused');
              setLoadingState(LoadingState.IDLE);
@@ -453,6 +494,7 @@ const App: React.FC = () => {
       }, 500);
 
     } catch (err: any) {
+      if (runId !== batchControlRef.current.runId) return;
       console.error("Batch Error:", err);
       // Don't use alert inside the loop if possible, or show it once
       setError(`خطأ في صفحة PDF رقم ${pdfPageNum}: ${err.message}`);
@@ -471,10 +513,11 @@ const App: React.FC = () => {
   const resumeBatch = () => {
     if (!pdfDoc || !activeSession) return;
     batchControlRef.current.shouldStop = false;
+    batchControlRef.current.runId += 1;
     setBatchStatus('running');
     setError(null);
     // Resume from current indices
-    processNextBatchPage(pdfDoc, currentPdfPageIdx, activeSession.currentPage);
+    processNextBatchPage(pdfDoc, currentPdfPageIdx, activeSession.currentPage, batchControlRef.current.runId);
   };
 
   const handleUpdatePageText = (newText: string) => {
@@ -573,6 +616,13 @@ const App: React.FC = () => {
       };
     });
   };
+
+  // Leave the viewer if its book disappears (e.g. deleted or replaced by a sync)
+  useEffect(() => {
+    if (view === 'full-viewer' && (!viewingBookTitle || !library.books[viewingBookTitle])) {
+      setView('library');
+    }
+  }, [view, viewingBookTitle, library.books]);
 
   const lastPageData = activeSession && lastProcessedPageId 
     ? library.books[activeSession.bookTitle]?.pages.find(p => p.id === lastProcessedPageId) || null
@@ -701,6 +751,7 @@ const App: React.FC = () => {
         {view === 'setup' && (
           <SessionSetup 
             library={library} 
+            currentUserId={firebaseUser?.uid}
             onStartSession={handleStartSession} 
             onOpenLibrary={() => setView('library')} 
             onAddPublisher={handleAddPublisher}
@@ -753,6 +804,7 @@ const App: React.FC = () => {
                       batchControlRef.current.shouldStop = true;
                     }} 
                     isLoading={loadingState === LoadingState.ANALYZING} 
+                    hasError={loadingState === LoadingState.ERROR}
                     isPdfMode={!!pdfDoc}
                   />
                 </div>
@@ -787,7 +839,7 @@ const App: React.FC = () => {
            />
         )}
 
-        {view === 'full-viewer' && viewingBookTitle && (
+        {view === 'full-viewer' && viewingBookTitle && library.books[viewingBookTitle] && (
           <FullBookViewer 
             book={library.books[viewingBookTitle]} 
             currentUserId={firebaseUser?.uid}
@@ -852,10 +904,11 @@ const LibraryView: React.FC<{
       let publicationPlace = "";
       let publicationYear = "";
       
-      doc.querySelectorAll('.book-meta p').forEach(p => {
+      doc.querySelectorAll('.book-meta p, .book-meta span').forEach(p => {
         const txt = p.textContent || "";
         if (txt.includes('تأليف:')) author = txt.split('تأليف:')[1].trim();
         if (txt.includes('إصدار:')) publisher = txt.split('إصدار:')[1].trim();
+        if (txt.includes('الناشر:')) publisher = txt.split('الناشر:')[1].trim();
         if (txt.includes('مكان النشر:')) publicationPlace = txt.split('مكان النشر:')[1].trim();
         if (txt.includes('سنة النشر:')) publicationYear = txt.split('سنة النشر:')[1].trim();
       });
@@ -866,15 +919,15 @@ const LibraryView: React.FC<{
       const newPages: PageData[] = [];
       pageContainers.forEach(container => {
          const pageNumEl = container.querySelector('.page-number');
-         const contentEl = container.querySelector('.manuscript-content');
+         const contentEl = container.querySelector('.manuscript-content, .content');
          
          if (pageNumEl && contentEl) {
-           const pageNum = parseInt(fromHindi(pageNumEl.textContent || "0"));
-           if (isNaN(pageNum)) return;
+           // Page label may be "صفحة ٥", so pull out the digits only
+           const pageNumMatch = fromHindi(pageNumEl.textContent || "").match(/\d+/);
+           if (!pageNumMatch) return;
+           const pageNum = parseInt(pageNumMatch[0]);
            
-           let content = contentEl.innerHTML;
-           content = content.replace(/\s+id="heading-[^"]*"/g, '');
-           content = fromHindi(content);
+           const content = fromHindi(htmlToRawTags(contentEl));
 
            newPages.push({
              id: generateId(),
@@ -908,6 +961,7 @@ const LibraryView: React.FC<{
           books: {
             ...prev.books,
             [title]: {
+              ...existingBook,
               title,
               author: author || existingBook?.author,
               publisher: publisher || existingBook?.publisher,
@@ -946,6 +1000,8 @@ const LibraryView: React.FC<{
       h1 { display: block; font-size: 2.2rem; font-weight: 800; color: #0f172a; margin: 1.5rem 0; border-right: 6px solid #c5a059; padding-right: 1.5rem; }
       h2 { display: block; font-size: 1.8rem; font-weight: 700; color: #334155; margin: 1.2rem 0; border-right: 4px solid #94a3b8; padding-right: 1rem; }
       h3 { display: block; font-size: 1.4rem; font-weight: 700; color: #475569; margin: 1rem 0; border-right: 2px solid #64748b; padding-right: 0.75rem; }
+      h4 { display: block; font-size: 1.2rem; font-weight: 700; color: #64748b; margin: 0.8rem 0; border-right: 2px solid #94a3b8; padding-right: 0.5rem; }
+      h5 { display: block; font-size: 1rem; font-weight: 700; color: #64748b; margin: 0.6rem 0; border-right: 2px solid #cbd5e1; padding-right: 0.5rem; }
       .center { display: block; text-align: center; margin: 1.5rem 0; font-weight: bold; font-size: 1.4rem; color: #334155; }
       .bold { font-weight: 800; color: #000; }
       .aya { color: #059669; background: rgba(16, 185, 129, 0.05); padding: 0 4px; border-radius: 4px; border-bottom: 1px solid #10b981; }
@@ -954,12 +1010,14 @@ const LibraryView: React.FC<{
       .footnote { display: block; font-size: 1.1rem; color: #64748b; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #e2e8f0; font-style: italic; font-family: 'Cairo', sans-serif; }
     `;
 
-    let htmlContent = `<!DOCTYPE html><html dir="rtl"><head><meta charset="UTF-8"><title>${book.title}</title><style>${css}</style></head><body>
+    let htmlContent = `<!DOCTYPE html><html dir="rtl" lang="ar"><head><meta charset="UTF-8"><title>${escapeHtml(book.title)}</title><style>${css}</style></head><body>
         <div class="book-header">
-          <h1 class="book-title">${book.title}</h1>
+          <h1 class="book-title">${escapeHtml(book.title)}</h1>
           <div class="book-meta">
-            <span>تأليف: ${book.author || 'غير معروف'}</span> • 
-            <span>الناشر: ${book.publisher || 'غير معروف'}</span> • 
+            <span>تأليف: ${escapeHtml(book.author || 'غير معروف')}</span> • 
+            <span>الناشر: ${escapeHtml(book.publisher || 'غير معروف')}</span> • ${book.publicationPlace ? `
+            <span>مكان النشر: ${escapeHtml(book.publicationPlace)}</span> • ` : ''}${book.publicationYear ? `
+            <span>سنة النشر: ${escapeHtml(book.publicationYear)}</span> • ` : ''}
             <span>${toHindi(book.pages.length)} صفحة</span>
           </div>
         </div>`;
@@ -971,7 +1029,6 @@ const LibraryView: React.FC<{
       let processedText = page.text
         .replace(/(?:\r\n|\r|\n)+\s*(\[\d+\])/g, ' $1')
         .replace(/\n+/g, '<br/>')
-        .replace(/<(h[1-3])>(.*?)<\/\1>/g, '<$1>$2</$1>')
         .replace(/<center>(.*?)<\/center>/g, '<span class="center">$1</span>')
         .replace(/<bold>(.*?)<\/bold>/g, '<span class="bold">$1</span>')
         .replace(/<aya>(.*?)<\/aya>/g, '<span class="aya">$1</span>')
@@ -989,7 +1046,7 @@ const LibraryView: React.FC<{
 
     htmlContent += `</body></html>`;
 
-    const blob = new Blob([htmlContent], { type: 'text/html' });
+    const blob = new Blob([htmlContent], { type: 'text/html;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -1017,7 +1074,7 @@ const LibraryView: React.FC<{
       content += text + "\n\n\n";
     });
 
-    const blob = new Blob([content], { type: 'text/plain' });
+    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -1025,6 +1082,7 @@ const LibraryView: React.FC<{
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
+    URL.revokeObjectURL(url);
     setDownloadMenuOpen(null);
   };
 
@@ -1286,10 +1344,10 @@ const FullBookViewer: React.FC<{
               return match;
           });
           
-          const finalText = tempText.replace(`___MERGE_TARGET___\\s*\\n*`, '').replace(`___MERGE_TARGET___`, '');
+          const finalText = tempText.replace(/___MERGE_TARGET___\s*/, '');
           onUpdatePage(book.title, page.id, finalText);
       } else {
-          alert('الدمج بين العناوين في صفحات مختلفة غير مدعوم من الفهرس السريع، استخدم المحرر המتصل.');
+          alert('الدمج بين العناوين في صفحات مختلفة غير مدعوم من الفهرس السريع، استخدم المحرر المتصل.');
       }
   };
 
@@ -1313,6 +1371,8 @@ const FullBookViewer: React.FC<{
   const handlePrevPage = () => changePage(activePageIndex - 1);
 
   const currentPageData = book.pages[activePageIndex];
+  // Slider progress (guards against division by zero for 0/1-page books)
+  const progressPercent = totalPages > 1 ? (activePageIndex / (totalPages - 1)) * 100 : 0;
 
   const renderReadMode = () => {
     if (!currentPageData) return null;
@@ -1376,23 +1436,27 @@ const FullBookViewer: React.FC<{
     setIsSyncingPdf(false);
   };
 
+  // Assuming user wants to sync with logical page number
+  const syncPageNum = book.pages[activePageIndex]?.pageNumber || activePageIndex + 1;
+
   useEffect(() => {
      if (syncPdfDoc && mode === 'edit') {
+         // Ignore results from renders superseded by a newer page change
+         let cancelled = false;
          const renderPdfSync = async () => {
-             // Assuming user wants to sync with logical page number
-             const pageNum = book.pages[activePageIndex]?.pageNumber || activePageIndex + 1;
              try {
-                const result = await renderPageAsImage(syncPdfDoc, pageNum);
-                setSyncImageUrl(result.previewUrl);
+                const result = await renderPageAsImage(syncPdfDoc, syncPageNum);
+                if (!cancelled) setSyncImageUrl(result.previewUrl);
              } catch(err) {
                 console.error("Failed to render sync page", err);
                 // Fallback to empty if it exceeds bounds or fails
-                setSyncImageUrl(null);
+                if (!cancelled) setSyncImageUrl(null);
              }
          };
          renderPdfSync();
+         return () => { cancelled = true; };
      }
-  }, [syncPdfDoc, activePageIndex, mode, book.pages]);
+  }, [syncPdfDoc, syncPageNum, mode]);
 
   return (
     <div className="flex h-screen bg-slate-950 overflow-hidden relative" dir="rtl">
@@ -1579,17 +1643,18 @@ const FullBookViewer: React.FC<{
                     <input 
                         type="range" 
                         min="0" 
-                        max={totalPages - 1} 
+                        max={Math.max(0, totalPages - 1)} 
+                        disabled={totalPages <= 1}
                         value={activePageIndex} 
                         onChange={(e) => changePage(parseInt(e.target.value))}
                         className="w-full h-1 bg-slate-700 rounded-lg appearance-none cursor-pointer focus:outline-none"
                     />
                     <div 
                         className="absolute top-0 right-0 h-1 bg-[#c5a059] rounded-lg pointer-events-none" 
-                        style={{ width: `${((activePageIndex) / (totalPages - 1)) * 100}%` }}
+                        style={{ width: `${progressPercent}%` }}
                     ></div>
                     {/* Tooltip on hover */}
-                    <div className="absolute bottom-6 right-0 transform translate-x-1/2 opacity-0 group-hover:opacity-100 transition-opacity bg-slate-800 text-white text-xs font-mono py-1 px-2 rounded border border-white/10 pointer-events-none" style={{ right: `${100 - ((activePageIndex) / (totalPages - 1)) * 100}%` }}>
+                    <div className="absolute bottom-6 right-0 transform translate-x-1/2 opacity-0 group-hover:opacity-100 transition-opacity bg-slate-800 text-white text-xs font-mono py-1 px-2 rounded border border-white/10 pointer-events-none" style={{ right: `${100 - progressPercent}%` }}>
                        ص {toHindi(book.pages[activePageIndex]?.pageNumber)}
                     </div>
                 </div>
@@ -1639,14 +1704,14 @@ const FullBookViewer: React.FC<{
 
                         <button 
                             onClick={handleNextPage}
-                            disabled={activePageIndex === totalPages - 1}
+                            disabled={activePageIndex >= totalPages - 1}
                             className="w-10 h-10 rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center text-[#c5a059] hover:bg-[#c5a059] hover:text-slate-900 transition-all shadow-lg disabled:opacity-50 disabled:cursor-not-allowed active:scale-95"
                         >
                             <ChevronLeft size={24} />
                         </button>
                         <button 
                             onClick={() => changePage(totalPages - 1)}
-                            disabled={activePageIndex === totalPages - 1}
+                            disabled={activePageIndex >= totalPages - 1}
                             className="text-slate-500 hover:text-white disabled:opacity-30 transition-colors"
                             title="النهاية"
                         >

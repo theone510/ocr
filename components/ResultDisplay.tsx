@@ -4,10 +4,10 @@ import {
   Copy, Check, FileText, Pencil, Save, X, 
   Music, MessageSquarePlus,
   Heading1, Heading2, Heading3, Heading4, Heading5, Sparkles, Quote,
-  Eraser, AlignCenter, Bold
+  Eraser, AlignCenter, Bold, AlertTriangle
 } from 'lucide-react';
 import { Button } from './Button';
-import { toHindi } from '../App';
+import { toHindi, fromHindi } from '../utils/digits';
 
 interface ResultDisplayProps {
   text: string | null;
@@ -56,6 +56,8 @@ export const ResultDisplay: React.FC<ResultDisplayProps> = ({
       .replace(/<h1>(.*?)<\/h1>/gs, '<h1 class="editor-h1">$1</h1>')
       .replace(/<h2>(.*?)<\/h2>/gs, '<h2 class="editor-h2">$1</h2>')
       .replace(/<h3>(.*?)<\/h3>/gs, '<h3 class="editor-h3">$1</h3>')
+      .replace(/<h4>(.*?)<\/h4>/gs, '<h4 class="editor-h4">$1</h4>')
+      .replace(/<h5>(.*?)<\/h5>/gs, '<h5 class="editor-h5">$1</h5>')
       .replace(/<center>(.*?)<\/center>/gs, '<div class="editor-center">$1</div>')
       .replace(/<bold>(.*?)<\/bold>/gs, '<span class="editor-bold">$1</span>')
       .replace(/<aya>(.*?)<\/aya>/gs, '<span class="editor-aya">$1</span>')
@@ -89,6 +91,10 @@ export const ResultDisplay: React.FC<ResultDisplayProps> = ({
           result += `<h2>${el.textContent}</h2>`;
         } else if (tag === 'h3' || el.classList.contains('editor-h3')) {
           result += `<h3>${el.textContent}</h3>`;
+        } else if (tag === 'h4' || el.classList.contains('editor-h4')) {
+          result += `<h4>${el.textContent}</h4>`;
+        } else if (tag === 'h5' || el.classList.contains('editor-h5')) {
+          result += `<h5>${el.textContent}</h5>`;
         } else if (el.classList.contains('editor-center') || el.style.textAlign === 'center') {
            result += `<center>${el.textContent}</center>\n`; // Add newline for block feel
         } else if (el.classList.contains('editor-bold') || tag === 'b' || tag === 'strong' || el.style.fontWeight === 'bold' || parseInt(el.style.fontWeight) >= 700) {
@@ -118,6 +124,12 @@ export const ResultDisplay: React.FC<ResultDisplayProps> = ({
 
     Array.from(temp.childNodes).forEach(processNode);
     
+    // The editor displays footnote numbers in Hindi digits; store them in Western
+    // digits so the [n] / "n:" footnote patterns keep matching after a save.
+    result = result
+      .replace(/\[([٠-٩]+)\]/g, (match, d) => `[${fromHindi(d)}]`)
+      .replace(/<footnote>\s*([٠-٩]+):/g, (match, d) => `<footnote>${fromHindi(d)}:`);
+
     // FINAL GLOBAL PROTOCOL: Collapse any sequence of \n into exactly one \n
     return cleanNewlines(result);
   };
@@ -265,8 +277,16 @@ export const ResultDisplay: React.FC<ResultDisplayProps> = ({
     </div>
   );
 
+  const errorBanner = error ? (
+    <div className="flex items-start gap-2 px-4 py-3 bg-red-950/60 border border-red-500/40 rounded-xl text-red-200 text-sm" role="alert">
+      <AlertTriangle size={18} className="shrink-0 mt-0.5 text-red-400" />
+      <span className="break-words">{error}</span>
+    </div>
+  ) : null;
+
   if (text === null) return (
-    <div className="w-full h-full min-h-[300px] flex flex-col items-center justify-center p-8 border-2 border-dashed border-slate-800 rounded-2xl text-slate-600">
+    <div className="w-full h-full min-h-[300px] flex flex-col items-center justify-center gap-4 p-8 border-2 border-dashed border-slate-800 rounded-2xl text-slate-600">
+      {errorBanner}
       <FileText size={48} className="mb-4 opacity-20" />
       <p>بانتظار تحليل المخطوط</p>
     </div>
@@ -361,6 +381,8 @@ export const ResultDisplay: React.FC<ResultDisplayProps> = ({
           )}
         </div>
       </div>
+
+      {errorBanner && <div className="px-4 pt-3">{errorBanner}</div>}
 
       {/* Scrollable Content */}
       <div className="flex-1 p-5 md:p-6 overflow-y-auto bg-slate-900 scrollbar-thin scrollbar-thumb-slate-700" dir="rtl">

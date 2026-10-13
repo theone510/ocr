@@ -6,8 +6,12 @@ import { SYSTEM_INSTRUCTION, GEMINI_MODEL } from "../constants";
 // to ensure it captures any potential updates to environment variables or session tokens.
 export const analyzeManuscript = async (base64Image: string, mimeType: string): Promise<string> => {
   try {
-    // Initialize with apiKey from environment variables as per requirements
-    const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_GEMINI_API_KEY });
+    // Accept either VITE_GEMINI_API_KEY or GEMINI_API_KEY (the latter is injected via vite.config.ts)
+    const apiKey = import.meta.env.VITE_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      throw new Error("مفتاح Gemini API غير مُعرّف. أضف GEMINI_API_KEY أو VITE_GEMINI_API_KEY إلى ملف .env.local");
+    }
+    const ai = new GoogleGenAI({ apiKey });
     
     // Model configuration for high-quality manuscript transcription
     const response = await ai.models.generateContent({

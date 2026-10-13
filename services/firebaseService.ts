@@ -1,7 +1,5 @@
-/// <reference types="vite/client" />
-/// <reference types="vite/client" />
 import { initializeApp } from "firebase/app";
-import { getFirestore, doc, setDoc, getDoc, collection, getDocs, deleteDoc } from "firebase/firestore";
+import { initializeFirestore, Firestore, doc, setDoc, getDoc, collection, getDocs, deleteDoc } from "firebase/firestore";
 import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from "firebase/auth";
 import { LibraryState, Book } from "../types";
 
@@ -16,14 +14,16 @@ const firebaseConfig = {
 
 // Initialize Firebase safely
 let app;
-export let db: ReturnType<typeof getFirestore> | null = null;
+export let db: Firestore | null = null;
 export let auth: ReturnType<typeof getAuth> | null = null;
 export let googleProvider: GoogleAuthProvider | null = null;
 
 try {
   if (firebaseConfig.apiKey) {
     app = initializeApp(firebaseConfig);
-    db = getFirestore(app);
+    // Optional book fields (author, publisher, ...) may be undefined; Firestore
+    // rejects undefined values unless told to ignore them.
+    db = initializeFirestore(app, { ignoreUndefinedProperties: true });
     auth = getAuth(app);
     googleProvider = new GoogleAuthProvider();
   } else {
@@ -48,6 +48,7 @@ export const loginWithGoogle = async () => {
 };
 
 export const logoutUser = async () => {
+  if (!auth) return;
   try {
     await signOut(auth);
   } catch (error) {
@@ -55,6 +56,10 @@ export const logoutUser = async () => {
     throw error;
   }
 };
+
+// Firestore document IDs can't contain "/", so map it to a look-alike character.
+// Titles without "/" keep their existing document IDs.
+const publicBookDocId = (title: string) => title.replace(/\//g, '∕');
 
 // Database Functions
 export const syncLibraryToFirestore = async (userId: string, library: LibraryState) => {
@@ -96,7 +101,7 @@ export const publishBookToPublic = async (book: Book, userId: string) => {
   }
   try {
     const bookWithOwner = { ...book, ownerId: userId, status: 'published' as const };
-    const publicDocRef = doc(db, "public_books", book.title);
+    const publicDocRef = doc(db, "public_books", publicBookDocId(book.title));
     await setDoc(publicDocRef, bookWithOwner);
   } catch (error) {
     console.error("Error publishing book:", error);
@@ -110,7 +115,7 @@ export const unpublishBookFromPublic = async (bookTitle: string) => {
     return;
   }
   try {
-    const publicDocRef = doc(db, "public_books", bookTitle);
+    const publicDocRef = doc(db, "public_books", publicBookDocId(bookTitle));
     await deleteDoc(publicDocRef);
   } catch (error) {
     console.error("Error unpublishing book:", error);
@@ -128,7 +133,8 @@ export const fetchPublicBooks = async (): Promise<Record<string, Book>> => {
     const bookSnapshot = await getDocs(publicBooksCol);
     const books: Record<string, Book> = {};
     bookSnapshot.forEach((docSnap) => {
-      books[docSnap.id] = docSnap.data() as Book;
+      const book = docSnap.data() as Book;
+      books[book.title || docSnap.id] = book;
     });
     return books;
   } catch (error) {

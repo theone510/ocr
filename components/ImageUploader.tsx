@@ -9,6 +9,7 @@ interface ImageUploaderProps {
   onPdfSelected: (file: File) => void;
   onClear: () => void;
   isLoading: boolean;
+  hasError?: boolean;
   isPdfMode?: boolean;
 }
 
@@ -18,6 +19,7 @@ export const ImageUploader: React.FC<ImageUploaderProps> = ({
   onPdfSelected,
   onClear,
   isLoading,
+  hasError,
   isPdfMode
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -59,8 +61,10 @@ export const ImageUploader: React.FC<ImageUploaderProps> = ({
           
           onImageSelected(cleanBase64, 'image/jpeg', base64);
         };
+        img.onerror = () => alert('تعذر قراءة الصورة. تأكد من أن الملف سليم.');
         img.src = e.target?.result as string;
       };
+      reader.onerror = () => alert('تعذر قراءة الملف.');
       reader.readAsDataURL(file);
     } else {
       alert('الرجاء رفع ملف PDF أو صورة (JPG/PNG).');
@@ -72,6 +76,8 @@ export const ImageUploader: React.FC<ImageUploaderProps> = ({
     if (file) {
       processFile(file);
     }
+    // Reset so selecting the same file again still triggers onChange
+    event.target.value = '';
   }, [onPdfSelected, onImageSelected]);
 
   const handleDragOver = (e: React.DragEvent) => {
@@ -108,7 +114,7 @@ export const ImageUploader: React.FC<ImageUploaderProps> = ({
               className="max-w-full h-auto object-contain shadow-2xl rounded border border-white/5"
             />
             {/* Overlay Status */}
-            <div className={`absolute top-4 left-1/2 transform -translate-x-1/2 backdrop-blur px-4 py-1.5 rounded-full shadow-lg border flex items-center gap-2 ${isLoading ? 'bg-slate-900/90 border-[#c5a059]/30' : 'bg-red-950/90 border-red-500/50'}`}>
+            <div className={`absolute top-4 left-1/2 transform -translate-x-1/2 backdrop-blur px-4 py-1.5 rounded-full shadow-lg border flex items-center gap-2 ${isLoading ? 'bg-slate-900/90 border-[#c5a059]/30' : hasError ? 'bg-red-950/90 border-red-500/50' : 'bg-slate-900/90 border-emerald-500/30'}`}>
                 {isLoading ? (
                   <>
                     <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse shadow-[0_0_8px_#10b981]"></div>
@@ -116,11 +122,18 @@ export const ImageUploader: React.FC<ImageUploaderProps> = ({
                       {isPdfMode ? 'AUTO-ANALYSIS RUNNING...' : 'ANALYZING IMAGE...'}
                     </span>
                   </>
-                ) : (
+                ) : hasError ? (
                   <>
                     <div className="w-2 h-2 bg-red-500 rounded-full shadow-[0_0_8px_#ef4444]"></div>
                     <span className="text-xs font-bold text-red-200 tracking-wide">
-                      توقف بسبب خطأ (راجع الخطأ بالأسفل)
+                      توقف بسبب خطأ (راجع الخطأ في لوحة النتائج)
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <div className="w-2 h-2 bg-emerald-500 rounded-full shadow-[0_0_8px_#10b981]"></div>
+                    <span className="text-xs font-bold text-emerald-200 tracking-wide">
+                      {isPdfMode ? 'متوقف مؤقتاً' : 'تم الاستخراج'}
                     </span>
                   </>
                 )}
